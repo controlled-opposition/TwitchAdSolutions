@@ -1,16 +1,16 @@
 {
-  // Type-checks vaft/vaft.user.js as JavaScript (JSDoc + types/vaft.d.ts). Emits nothing;
-  // the userscript ships exactly as written.
-  "compilerOptions": {
-    "target": "es2022",
-    "lib": ["es2022", "dom", "dom.iterable"],
-    "types": [],
-    "allowJs": true,
-    "checkJs": true,
-    "noEmit": true,
-    "strict": true,
-    "noImplicitThis": true,
-    "skipLibCheck": true
-  },
-  "files": ["vaft/vaft.user.js", "types/vaft.d.ts"]
+    // Type-checks vaft/vaft.user.js as JavaScript (JSDoc + types/vaft.d.ts). Emits nothing;
+    // the userscript ships exactly as written.
+    "compilerOptions": {
+        "target": "es2022",
+        "lib": ["es2022", "dom", "dom.iterable"],
+        "types": [],
+        "allowJs": true,
+        "checkJs": true,
+        "noEmit": true,
+        "strict": true,
+        "noImplicitThis": true,
+        "skipLibCheck": true
+    },
+    "files": ["vaft/vaft.user.js", "types/vaft.d.ts"]
 }

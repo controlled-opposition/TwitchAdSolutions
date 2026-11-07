@@ -70,7 +70,8 @@ https://video-edge-abc.fra02.abs.hls.ttvnw.net/v1/segment/CpUE_seg48204.ts
 https://video-edge-abc.fra02.abs.hls.ttvnw.net/v1/segment/CpUE_seg48205.ts`;
 
 const PARSE_ATTR_INPUT = 'BANDWIDTH=6000000,CODECS="avc1.64002A",RESOLUTION=1920x1080,FRAME-RATE=60.000';
-const PARSE_ATTR_TAG = '#EXT-X-STREAM-INF:BANDWIDTH=6000000,CODECS="avc1.64002A",RESOLUTION=1920x1080,FRAME-RATE=60.000';
+const PARSE_ATTR_TAG =
+    '#EXT-X-STREAM-INF:BANDWIDTH=6000000,CODECS="avc1.64002A",RESOLUTION=1920x1080,FRAME-RATE=60.000';
 
 // ============================================================
 // pixeltris functions (baseline)
@@ -94,7 +95,11 @@ const pixeltris = (() => {
             line = line
                 .replaceAll(/(X-TV-TWITCH-AD-URL=")(?:[^"]*)(")/g, `$1${newAdUrl}$2`)
                 .replaceAll(/(X-TV-TWITCH-AD-CLICK-TRACKING-URL=")(?:[^"]*)(")/g, `$1${newAdUrl}$2`);
-            if (i < lines.length - 1 && line.startsWith('#EXTINF') && (!line.includes(',live') || stripAllSegments || AllSegmentsAreAdSegments)) {
+            if (
+                i < lines.length - 1 &&
+                line.startsWith('#EXTINF') &&
+                (!line.includes(',live') || stripAllSegments || AllSegmentsAreAdSegments)
+            ) {
                 const segmentUrl = lines[i + 1];
                 if (!AdSegmentCache.has(segmentUrl)) {
                     streamInfo.NumStrippedAdSegments++;
@@ -126,18 +131,22 @@ const pixeltris = (() => {
 
     function parseAttributes(str) {
         return Object.fromEntries(
-            str.split(/(?:^|,)((?:[^=]*)=(?:"[^"]*"|[^,]*))/)
-            .filter(Boolean)
-            .map(x => {
-                const idx = x.indexOf('=');
-                const key = x.substring(0, idx);
-                const value = x.substring(idx + 1);
-                const num = Number(value);
-                return [key, Number.isNaN(num) ? value.startsWith('"') ? JSON.parse(value) : value : num];
-            }));
+            str
+                .split(/(?:^|,)((?:[^=]*)=(?:"[^"]*"|[^,]*))/)
+                .filter(Boolean)
+                .map((x) => {
+                    const idx = x.indexOf('=');
+                    const key = x.substring(0, idx);
+                    const value = x.substring(idx + 1);
+                    const num = Number(value);
+                    return [key, Number.isNaN(num) ? (value.startsWith('"') ? JSON.parse(value) : value) : num];
+                }),
+        );
     }
 
-    function reset() { AdSegmentCache.clear(); }
+    function reset() {
+        AdSegmentCache.clear();
+    }
 
     return { hasAdTags, stripAdSegments, parseAttributes, reset };
 })();
@@ -152,7 +161,9 @@ const vaft = {
     hasAdTags: vaftContext.hasAdTags,
     stripAdSegments: vaftContext.stripAdSegments,
     parseAttributes: vaftContext.parseAttributes,
-    reset() { vaftContext.AdSegmentCache.clear(); },
+    reset() {
+        vaftContext.AdSegmentCache.clear();
+    },
 };
 
 // ============================================================
@@ -174,7 +185,7 @@ function bench(name, fn, iterations = 50000) {
     if (global.gc) global.gc();
     const memAfter = process.memoryUsage();
 
-    const opsPerSec = (iterations / elapsed * 1000).toFixed(0);
+    const opsPerSec = ((iterations / elapsed) * 1000).toFixed(0);
     const heapDelta = ((memAfter.heapUsed - memBefore.heapUsed) / 1024).toFixed(1);
 
     return { name, elapsed: elapsed.toFixed(2), opsPerSec, heapDelta, iterations };
@@ -184,7 +195,7 @@ function compare(label, pixeltrisFn, vaftFn, iterations) {
     const p = bench('pixeltris', pixeltrisFn, iterations);
     const r = bench('vaft', vaftFn, iterations);
     const ratio = (p.elapsed / r.elapsed).toFixed(2);
-    const speedup = ratio > 1 ? ratio + 'x faster' : (1/ratio).toFixed(2) + 'x slower';
+    const speedup = ratio > 1 ? ratio + 'x faster' : (1 / ratio).toFixed(2) + 'x slower';
 
     console.log(`\n--- ${label} (${p.iterations} iterations) ---`);
     console.log(`  pixeltris:  ${p.elapsed}ms  (${p.opsPerSec} ops/s, heap delta: ${p.heapDelta} KB)`);
@@ -209,7 +220,7 @@ compare(
     'hasAdTags (clean playlist)',
     () => pixeltris.hasAdTags(CLEAN_PLAYLIST),
     () => vaft.hasAdTags(CLEAN_PLAYLIST),
-    200000
+    200000,
 );
 
 // 2. hasAdTags — ad playlist (ads present)
@@ -217,31 +228,49 @@ compare(
     'hasAdTags (ad playlist)',
     () => pixeltris.hasAdTags(AD_PLAYLIST),
     () => vaft.hasAdTags(AD_PLAYLIST),
-    200000
+    200000,
 );
 
 // 3. stripAdSegments — clean playlist
 compare(
     'stripAdSegments (clean playlist)',
-    () => { pixeltris.reset(); pixeltris.stripAdSegments(CLEAN_PLAYLIST, false, makeStreamInfo()); },
-    () => { vaft.reset(); vaft.stripAdSegments(CLEAN_PLAYLIST, false, makeStreamInfo()); },
-    50000
+    () => {
+        pixeltris.reset();
+        pixeltris.stripAdSegments(CLEAN_PLAYLIST, false, makeStreamInfo());
+    },
+    () => {
+        vaft.reset();
+        vaft.stripAdSegments(CLEAN_PLAYLIST, false, makeStreamInfo());
+    },
+    50000,
 );
 
 // 4. stripAdSegments — ad playlist (the hot path during ads)
 compare(
     'stripAdSegments (ad playlist)',
-    () => { pixeltris.reset(); pixeltris.stripAdSegments(AD_PLAYLIST, false, makeStreamInfo()); },
-    () => { vaft.reset(); vaft.stripAdSegments(AD_PLAYLIST, false, makeStreamInfo()); },
-    50000
+    () => {
+        pixeltris.reset();
+        pixeltris.stripAdSegments(AD_PLAYLIST, false, makeStreamInfo());
+    },
+    () => {
+        vaft.reset();
+        vaft.stripAdSegments(AD_PLAYLIST, false, makeStreamInfo());
+    },
+    50000,
 );
 
 // 5. stripAdSegments — SCTE-35 playlist (vaft-only detection)
 compare(
     'stripAdSegments (SCTE-35 playlist)',
-    () => { pixeltris.reset(); pixeltris.stripAdSegments(SCTE35_PLAYLIST, false, makeStreamInfo()); },
-    () => { vaft.reset(); vaft.stripAdSegments(SCTE35_PLAYLIST, false, makeStreamInfo()); },
-    50000
+    () => {
+        pixeltris.reset();
+        pixeltris.stripAdSegments(SCTE35_PLAYLIST, false, makeStreamInfo());
+    },
+    () => {
+        vaft.reset();
+        vaft.stripAdSegments(SCTE35_PLAYLIST, false, makeStreamInfo());
+    },
+    50000,
 );
 
 // 6. parseAttributes — plain attribute string
@@ -249,7 +278,7 @@ compare(
     'parseAttributes (attribute string)',
     () => pixeltris.parseAttributes(PARSE_ATTR_INPUT),
     () => vaft.parseAttributes(PARSE_ATTR_INPUT),
-    100000
+    100000,
 );
 
 // 7. parseAttributes — full HLS tag line (vaft strips prefix)
@@ -257,15 +286,19 @@ compare(
     'parseAttributes (full HLS tag)',
     () => pixeltris.parseAttributes(PARSE_ATTR_TAG),
     () => vaft.parseAttributes(PARSE_ATTR_TAG),
-    100000
+    100000,
 );
 
 // 8. parseAttributes — null/empty input (vaft guards, pixeltris crashes)
 compare(
     'parseAttributes (null input)',
-    () => { try { pixeltris.parseAttributes(null); } catch {} },
+    () => {
+        try {
+            pixeltris.parseAttributes(null);
+        } catch {}
+    },
     () => vaft.parseAttributes(null),
-    200000
+    200000,
 );
 
 // 9. Combined: hasAdTags + stripAdSegments (simulates one m3u8 cycle with ads)
@@ -283,7 +316,7 @@ compare(
             vaft.stripAdSegments(AD_PLAYLIST, false, makeStreamInfo());
         }
     },
-    50000
+    50000,
 );
 
 // 10. Dictionary lookup — StreamInfosByUrl pattern
@@ -292,14 +325,18 @@ compare(
     () => {
         const dict = [];
         for (let i = 0; i < 20; i++) dict['key' + i] = { v: i };
-        for (let i = 0; i < 20; i++) { const _ = dict['key' + i]; }
+        for (let i = 0; i < 20; i++) {
+            const _ = dict['key' + i];
+        }
     },
     () => {
         const dict = Object.create(null);
         for (let i = 0; i < 20; i++) dict['key' + i] = { v: i };
-        for (let i = 0; i < 20; i++) { const _ = dict['key' + i]; }
+        for (let i = 0; i < 20; i++) {
+            const _ = dict['key' + i];
+        }
     },
-    100000
+    100000,
 );
 
 console.log('\n=== Done ===');

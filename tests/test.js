@@ -18,7 +18,9 @@ function assertEq(actual, expected, message) {
         passed++;
     } else {
         failed++;
-        console.error('FAIL: ' + message + ' — expected ' + JSON.stringify(expected) + ', got ' + JSON.stringify(actual));
+        console.error(
+            'FAIL: ' + message + ' — expected ' + JSON.stringify(expected) + ', got ' + JSON.stringify(actual),
+        );
     }
 }
 
@@ -27,7 +29,9 @@ function assertDeepEq(actual, expected, message) {
         passed++;
     } else {
         failed++;
-        console.error('FAIL: ' + message + ' — expected ' + JSON.stringify(expected) + ', got ' + JSON.stringify(actual));
+        console.error(
+            'FAIL: ' + message + ' — expected ' + JSON.stringify(expected) + ', got ' + JSON.stringify(actual),
+        );
     }
 }
 
@@ -73,7 +77,10 @@ function makeStreamInfo(overrides = {}) {
 console.log('--- hasAdTags ---');
 assert(hasAdTags('stitched-ad-12345.ts') === true, 'detects stitched-ad');
 assert(hasAdTags('#EXT-X-CUE-OUT:DURATION=30') === true, 'detects EXT-X-CUE-OUT');
-assert(hasAdTags('#EXT-X-DATERANGE:CLASS="twitch-stitched-ad"') === true, 'detects twitch-stitched-ad (via prefix + stitched-ad)');
+assert(
+    hasAdTags('#EXT-X-DATERANGE:CLASS="twitch-stitched-ad"') === true,
+    'detects twitch-stitched-ad (via prefix + stitched-ad)',
+);
 assert(hasAdTags('#EXT-X-DATERANGE:CLASS="twitch-maf-ad"') === true, 'detects twitch-maf-ad exact');
 assert(hasAdTags('normal-segment-12345.ts') === false, 'clean segment returns false');
 assert(hasAdTags('#EXTINF:2.000,live\nhttps://video.twitch.tv/segment.ts') === false, 'normal m3u8 returns false');
@@ -87,10 +94,18 @@ assert(hasAdTags('SCTE35-OUT') === false, 'SCTE35-OUT no longer a signifier');
 // Test: getMatchedAdSignifiers
 // ============================================================
 console.log('--- getMatchedAdSignifiers ---');
-assertDeepEq(getMatchedAdSignifiers('stitched-ad with #EXT-X-CUE-OUT marker'), ['stitched-ad', 'EXT-X-CUE-OUT'], 'matches multiple signifiers');
+assertDeepEq(
+    getMatchedAdSignifiers('stitched-ad with #EXT-X-CUE-OUT marker'),
+    ['stitched-ad', 'EXT-X-CUE-OUT'],
+    'matches multiple signifiers',
+);
 assertDeepEq(getMatchedAdSignifiers('#EXT-X-CUE-OUT:DURATION=30'), ['EXT-X-CUE-OUT'], 'matches single CUE-OUT');
 assertDeepEq(getMatchedAdSignifiers('normal content'), [], 'no matches on clean content');
-assertDeepEq(getMatchedAdSignifiers('#EXT-X-DATERANGE:CLASS="twitch-stitched-ad"'), ['stitched-ad', 'twitch-stitched'], 'twitch-stitched-ad hits both stitched-ad substring and twitch-stitched prefix');
+assertDeepEq(
+    getMatchedAdSignifiers('#EXT-X-DATERANGE:CLASS="twitch-stitched-ad"'),
+    ['stitched-ad', 'twitch-stitched'],
+    'twitch-stitched-ad hits both stitched-ad substring and twitch-stitched prefix',
+);
 // PR #166 broadened coverage via twitch-stitched prefix (catches future variants like twitch-stitched-mid, twitch-stitched-pod).
 assert(hasAdTags('#EXT-X-DATERANGE:CLASS="twitch-stitched-mid"') === true, 'detects twitch-stitched-mid via prefix');
 assert(hasAdTags('#EXT-X-DATERANGE:CLASS="twitch-stitched-pod"') === true, 'detects twitch-stitched-pod via prefix');
@@ -103,7 +118,9 @@ assert(hasAdTags('#EXT-X-DATERANGE:CLASS="twitch-ad-quartile"') === false, 'twit
 // Test: parseAttributes
 // ============================================================
 console.log('--- parseAttributes ---');
-const attrs1 = parseAttributes('#EXT-X-STREAM-INF:BANDWIDTH=6000000,RESOLUTION=1920x1080,CODECS="avc1.4D4028",FRAME-RATE=30.0');
+const attrs1 = parseAttributes(
+    '#EXT-X-STREAM-INF:BANDWIDTH=6000000,RESOLUTION=1920x1080,CODECS="avc1.4D4028",FRAME-RATE=30.0',
+);
 assertEq(attrs1['RESOLUTION'], '1920x1080', 'parses resolution');
 assertEq(attrs1['FRAME-RATE'], 30, 'parses frame rate as number');
 assertEq(attrs1['CODECS'], 'avc1.4D4028', 'parses quoted codecs');
@@ -111,7 +128,9 @@ assertEq(attrs1['CODECS'], 'avc1.4D4028', 'parses quoted codecs');
 const attrs1b = parseAttributes('BANDWIDTH=6000000,RESOLUTION=1920x1080');
 assertEq(attrs1b['BANDWIDTH'], 6000000, 'parses bandwidth as number when first attribute');
 
-const attrs2 = parseAttributes('#EXT-X-STREAM-INF:BANDWIDTH=1500000,RESOLUTION=852x480,CODECS="hev1.1.6.L120",FRAME-RATE=60.0');
+const attrs2 = parseAttributes(
+    '#EXT-X-STREAM-INF:BANDWIDTH=1500000,RESOLUTION=852x480,CODECS="hev1.1.6.L120",FRAME-RATE=60.0',
+);
 assertEq(attrs2['RESOLUTION'], '852x480', 'parses 480p resolution');
 assertEq(attrs2['CODECS'], 'hev1.1.6.L120', 'parses HEVC codec');
 assertEq(attrs2['FRAME-RATE'], 60, 'parses 60fps');
@@ -121,11 +140,19 @@ assertEq(attrs2['FRAME-RATE'], 60, 'parses 60fps');
 // ============================================================
 console.log('--- getServerTimeFromM3u8 ---');
 vaft.V2API = false;
-assertEq(getServerTimeFromM3u8('#EXT-X-TWITCH-ELAPSED-SECS:10.5,SERVER-TIME="1234567890.123"'), '1234567890.123', 'extracts v1 server time');
+assertEq(
+    getServerTimeFromM3u8('#EXT-X-TWITCH-ELAPSED-SECS:10.5,SERVER-TIME="1234567890.123"'),
+    '1234567890.123',
+    'extracts v1 server time',
+);
 assertEq(getServerTimeFromM3u8('no server time here'), null, 'returns null when no server time');
 
 vaft.V2API = true;
-assertEq(getServerTimeFromM3u8('#EXT-X-SESSION-DATA:DATA-ID="SERVER-TIME",VALUE="9876543210.456"'), '9876543210.456', 'extracts v2 server time');
+assertEq(
+    getServerTimeFromM3u8('#EXT-X-SESSION-DATA:DATA-ID="SERVER-TIME",VALUE="9876543210.456"'),
+    '9876543210.456',
+    'extracts v2 server time',
+);
 assertEq(getServerTimeFromM3u8('no server time here'), null, 'returns null for v2 when no match');
 vaft.V2API = false;
 
@@ -135,7 +162,10 @@ vaft.V2API = false;
 console.log('--- replaceServerTimeInM3u8 ---');
 vaft.V2API = false;
 const m3u8WithTime = '#EXT-X-TWITCH-ELAPSED-SECS:10.5,SERVER-TIME="1234567890.123"';
-assert(replaceServerTimeInM3u8(m3u8WithTime, '9999999999.000').includes('SERVER-TIME="9999999999.000"'), 'replaces v1 server time');
+assert(
+    replaceServerTimeInM3u8(m3u8WithTime, '9999999999.000').includes('SERVER-TIME="9999999999.000"'),
+    'replaces v1 server time',
+);
 assertEq(replaceServerTimeInM3u8(m3u8WithTime, null), m3u8WithTime, 'returns original when newServerTime is null');
 
 vaft.V2API = true;
@@ -162,21 +192,21 @@ const encodingsM3u8 = [
 assertEq(
     getStreamUrlForResolution(encodingsM3u8, { Resolution: '1920x1080', FrameRate: 30 }),
     'https://video.twitch.tv/1080p30.m3u8',
-    'exact resolution + framerate match'
+    'exact resolution + framerate match',
 );
 assertEq(
     getStreamUrlForResolution(encodingsM3u8, { Resolution: '1280x720', FrameRate: 60 }),
     'https://video.twitch.tv/720p60.m3u8',
-    'exact 720p60 match'
+    'exact 720p60 match',
 );
 assertEq(
     getStreamUrlForResolution(encodingsM3u8, { Resolution: '1280x720', FrameRate: 30 }),
     'https://video.twitch.tv/720p60.m3u8',
-    'resolution match without framerate match returns closest'
+    'resolution match without framerate match returns closest',
 );
 assert(
     getStreamUrlForResolution(encodingsM3u8, { Resolution: '1600x900', FrameRate: 30 }) != null,
-    'non-exact resolution returns closest match'
+    'non-exact resolution returns closest match',
 );
 
 // ============================================================
@@ -286,8 +316,8 @@ const allAdM3u8 = [
 streamInfo = makeStreamInfo({
     RecoverySegments: [
         { extinf: '#EXTINF:2.000,live', url: 'https://recovery-1.ts' },
-        { extinf: '#EXTINF:2.000,live', url: 'https://recovery-2.ts' }
-    ]
+        { extinf: '#EXTINF:2.000,live', url: 'https://recovery-2.ts' },
+    ],
 });
 result = stripAdSegments(allAdM3u8, false, streamInfo);
 assert(result.includes('https://recovery-1.ts'), 'restores recovery segment 1');
@@ -311,23 +341,14 @@ stripAdSegments(playlistWithSeq, false, streamInfo);
 assertEq(streamInfo.RecoveryStartSeq, 100, 'captures RecoveryStartSeq at cache time');
 // Injection phase: ads-only playlist with MEDIA-SEQUENCE=200 → should rewrite to 100
 AdSegmentCache.clear();
-const adOnlyWithSeq = [
-    '#EXTM3U',
-    '#EXT-X-MEDIA-SEQUENCE:200',
-    '#EXTINF:2.000,stitched-ad',
-    'https://ad.ts',
-].join('\n');
+const adOnlyWithSeq = ['#EXTM3U', '#EXT-X-MEDIA-SEQUENCE:200', '#EXTINF:2.000,stitched-ad', 'https://ad.ts'].join('\n');
 result = stripAdSegments(adOnlyWithSeq, false, streamInfo);
 assert(result.includes('#EXT-X-MEDIA-SEQUENCE:100'), 'rewrites MEDIA-SEQUENCE to match recovery segments');
 assert(!result.includes('#EXT-X-MEDIA-SEQUENCE:200'), 'replaces original MEDIA-SEQUENCE');
 
 // Test: stripAllSegments mode
 AdSegmentCache.clear();
-const mixedM3u8 = [
-    '#EXTM3U',
-    '#EXTINF:2.000,live',
-    'https://live-segment.ts',
-].join('\n');
+const mixedM3u8 = ['#EXTM3U', '#EXTINF:2.000,live', 'https://live-segment.ts'].join('\n');
 
 streamInfo = makeStreamInfo();
 result = stripAdSegments(mixedM3u8, true, streamInfo);
@@ -371,11 +392,7 @@ assert(AdSegmentCache.has('https://ad-1.ts'), 'strips segment with multiple sign
 
 // Test: AdSegmentCache deduplication
 AdSegmentCache.clear();
-const dupeM3u8 = [
-    '#EXTM3U',
-    '#EXTINF:2.000,stitched-ad',
-    'https://same-ad.ts',
-].join('\n');
+const dupeM3u8 = ['#EXTM3U', '#EXTINF:2.000,stitched-ad', 'https://same-ad.ts'].join('\n');
 
 streamInfo = makeStreamInfo();
 stripAdSegments(dupeM3u8, false, streamInfo);
@@ -388,13 +405,32 @@ assertEq(streamInfo2.NumStrippedAdSegments, 0, 'duplicate URL does not increment
 // Test: isValidWorker
 // ============================================================
 console.log('--- isValidWorker ---');
-assert(isValidWorker({ toString: () => 'function Worker() { /* twitch worker */ }' }) === false, 'rejects worker with twitch conflict');
-assert(isValidWorker({ toString: () => 'function Worker() { isVariantA }' }) === true, 'allows worker with reinsert pattern (TwitchNoSub)');
-assert(isValidWorker({ toString: () => 'function Worker() { besuper/ }' }) === true, 'allows worker with besuper reinsert');
-assert(isValidWorker({ toString: () => 'function Worker() { /* clean */ }' }) === true, 'allows clean worker without conflicts');
-assert(isValidWorker({ toString: () => 'function Worker() { twitch isVariantA }' }) === true, 'allows conflict + reinsert combination');
-// biome-ignore lint/suspicious/noTemplateCurlyInString: literal TwitchNoSub marker
-assert(isValidWorker({ toString: () => 'function Worker() { ${patch_url} }' }) === true, 'allows worker with ${patch_url} reinsert');
+assert(
+    isValidWorker({ toString: () => 'function Worker() { /* twitch worker */ }' }) === false,
+    'rejects worker with twitch conflict',
+);
+assert(
+    isValidWorker({ toString: () => 'function Worker() { isVariantA }' }) === true,
+    'allows worker with reinsert pattern (TwitchNoSub)',
+);
+assert(
+    isValidWorker({ toString: () => 'function Worker() { besuper/ }' }) === true,
+    'allows worker with besuper reinsert',
+);
+assert(
+    isValidWorker({ toString: () => 'function Worker() { /* clean */ }' }) === true,
+    'allows clean worker without conflicts',
+);
+assert(
+    isValidWorker({ toString: () => 'function Worker() { twitch isVariantA }' }) === true,
+    'allows conflict + reinsert combination',
+);
+// biome-ignore-start lint/suspicious/noTemplateCurlyInString: literal TwitchNoSub marker
+assert(
+    isValidWorker({ toString: () => 'function Worker() { ${patch_url} }' }) === true,
+    'allows worker with ${patch_url} reinsert',
+);
+// biome-ignore-end lint/suspicious/noTemplateCurlyInString: literal TwitchNoSub marker
 
 // ============================================================
 // Test: AdSegmentCache TTL cleanup
@@ -421,8 +457,16 @@ assert(hasAdTags('EXT-X-DATERANGE:CLASS="twitch-maf-ad"') === true, 'detects twi
 // Test: getStreamUrlForResolution — edge cases
 // ============================================================
 console.log('--- getStreamUrlForResolution (edge cases) ---');
-assertEq(getStreamUrlForResolution('#EXTM3U\n', { Resolution: '1920x1080', FrameRate: 30 }), null, 'returns null for empty m3u8');
-assertEq(getStreamUrlForResolution('', { Resolution: '1920x1080', FrameRate: 30 }), null, 'returns null for empty string');
+assertEq(
+    getStreamUrlForResolution('#EXTM3U\n', { Resolution: '1920x1080', FrameRate: 30 }),
+    null,
+    'returns null for empty m3u8',
+);
+assertEq(
+    getStreamUrlForResolution('', { Resolution: '1920x1080', FrameRate: 30 }),
+    null,
+    'returns null for empty string',
+);
 
 // ============================================================
 // Test: getServerTimeFromM3u8 — edge cases
@@ -432,7 +476,11 @@ vaft.V2API = false;
 assertEq(getServerTimeFromM3u8('SERVER-TIME=""'), null, 'returns null for empty server time');
 assertEq(getServerTimeFromM3u8('SERVER-TIME="abc"'), null, 'returns null for non-numeric v1 time');
 vaft.V2API = true;
-assertEq(getServerTimeFromM3u8('#EXT-X-SESSION-DATA:DATA-ID="OTHER",VALUE="123"'), null, 'returns null for wrong DATA-ID');
+assertEq(
+    getServerTimeFromM3u8('#EXT-X-SESSION-DATA:DATA-ID="OTHER",VALUE="123"'),
+    null,
+    'returns null for wrong DATA-ID',
+);
 vaft.V2API = false;
 
 // ============================================================
@@ -451,10 +499,19 @@ console.log('--- worker blob functions ---');
 {
     const fs = require('node:fs');
     const { SCRIPT_PATH } = require('./load-vaft');
-    const serialized = [...fs.readFileSync(SCRIPT_PATH, 'utf8').matchAll(/\$\{(\w+)\.toString\(\)\}/g)].map((m) => m[1]);
-    assert(serialized.length >= 10, 'found the serialized function list in the worker template (' + serialized.length + ')');
+    const serialized = [...fs.readFileSync(SCRIPT_PATH, 'utf8').matchAll(/\$\{(\w+)\.toString\(\)\}/g)].map(
+        (m) => m[1],
+    );
+    assert(
+        serialized.length >= 10,
+        'found the serialized function list in the worker template (' + serialized.length + ')',
+    );
     let worker = null;
-    try { worker = loadVaft(serialized); } catch (e) { console.error(e); }
+    try {
+        worker = loadVaft(serialized);
+    } catch (e) {
+        console.error(e);
+    }
     assert(worker !== null, 'all serialized functions load together in a fresh context');
     for (const name of serialized) {
         assert(worker && typeof worker[name] === 'function', name + ' is defined after loading');
@@ -467,19 +524,40 @@ console.log('--- worker blob functions ---');
 // Async cases run in order before the results are printed (see the end of the file).
 const asyncTests = [];
 // An unhandled rejection from the loaded code is a failure, not a crash of the test run.
-process.on('unhandledRejection', (e) => { failed++; console.error('FAIL: unhandled rejection: ' + (e && e.message)); });
+process.on('unhandledRejection', (e) => {
+    failed++;
+    console.error('FAIL: unhandled rejection: ' + (e && e.message));
+});
 
 // Runs one master-playlist request through the worker fetch hook with a mocked network.
 // Resolves to 'resolved' or 'hung' (no answer within 500ms).
 function workerMasterFetch(worker, url) {
     return Promise.race([
-        worker.fetch(url).then(() => 'resolved', () => 'rejected'),
+        worker.fetch(url).then(
+            () => 'resolved',
+            () => 'rejected',
+        ),
         new Promise((resolve) => setTimeout(() => resolve('hung'), 500)),
     ]);
 }
 function makeWorkerContext(network) {
     const worker = loadVaft(
-        ['hookWorkerFetch', 'getServerTimeFromM3u8', 'replaceServerTimeInM3u8', 'parseAttributes', 'videoCodecFamily', 'createStreamInfo', 'processM3U8', 'hasAdTags', 'getMatchedAdSignifiers', 'stripAdSegments', 'notifyAdComplete', 'getStreamUrlForResolution', 'gqlRequest', 'getAccessToken'],
+        [
+            'hookWorkerFetch',
+            'getServerTimeFromM3u8',
+            'replaceServerTimeInM3u8',
+            'parseAttributes',
+            'videoCodecFamily',
+            'createStreamInfo',
+            'processM3U8',
+            'hasAdTags',
+            'getMatchedAdSignifiers',
+            'stripAdSegments',
+            'notifyAdComplete',
+            'getStreamUrlForResolution',
+            'gqlRequest',
+            'getAccessToken',
+        ],
         { globals: { Response, Blob, URL, atob, Uint8Array, setTimeout, clearTimeout, fetch: network } },
     );
     worker.hookWorkerFetch();
@@ -497,13 +575,20 @@ asyncTests.push(async () => {
     console.log('--- hookWorkerFetch: cached-session probe ---');
     const requested = [];
     const worker = makeWorkerContext(async (input) => {
-        if (typeof input !== 'string') throw new TypeError('Failed to parse URL from ' + input);// like a real fetch(undefined) in a blob worker
+        if (typeof input !== 'string') throw new TypeError('Failed to parse URL from ' + input); // like a real fetch(undefined) in a blob worker
         requested.push(input);
         return new Response(input === masterUrl ? v2Encodings : '#EXTM3U', { status: 200 });
     });
     assertEq(await workerMasterFetch(worker, masterUrl), 'resolved', 'first master playlist request resolves');
-    assertEq(await workerMasterFetch(worker, masterUrl), 'resolved', 'repeat request with a v2 cache (no .m3u8 variant line) resolves instead of hanging');
-    assert(requested.includes('https://video-edge.example.net/v1/segment/chunked/abc'), 'v2 cache is probed through its raw CDN variant URL');
+    assertEq(
+        await workerMasterFetch(worker, masterUrl),
+        'resolved',
+        'repeat request with a v2 cache (no .m3u8 variant line) resolves instead of hanging',
+    );
+    assert(
+        requested.includes('https://video-edge.example.net/v1/segment/chunked/abc'),
+        'v2 cache is probed through its raw CDN variant URL',
+    );
     assert(worker.StreamInfos.testchan !== undefined, 'stream session exists after the repeat request');
 });
 
@@ -514,7 +599,11 @@ asyncTests.push(async () => {
     });
     await workerMasterFetch(worker, masterUrl);
     const first = worker.StreamInfos.testchan;
-    assertEq(await workerMasterFetch(worker, masterUrl), 'resolved', 'repeat request still resolves when the cache probe rejects');
+    assertEq(
+        await workerMasterFetch(worker, masterUrl),
+        'resolved',
+        'repeat request still resolves when the cache probe rejects',
+    );
     assert(worker.StreamInfos.testchan !== first, 'a rejected probe rebuilds the stream session');
 });
 
@@ -524,7 +613,9 @@ asyncTests.push(async () => {
 asyncTests.push(async () => {
     console.log('--- gqlRequest headers ---');
     const posted = [];
-    const worker = loadVaft(['gqlRequest'], { globals: { setTimeout, clearTimeout, postMessage: (m) => posted.push(m) } });
+    const worker = loadVaft(['gqlRequest'], {
+        globals: { setTimeout, clearTimeout, postMessage: (m) => posted.push(m) },
+    });
     worker.pendingFetchRequests = new Map();
     worker.GQLDeviceID = 'device123';
     worker.AuthorizationHeader = undefined;
@@ -545,15 +636,37 @@ asyncTests.push(async () => {
     console.log('--- hookFetch ---');
     const calls = [];
     const page = loadVaft(
-        ['hookFetch', 'maskAsNative', 'postTwitchWorkerMessage', 'twitchWorkers', 'countCsaiRequest', 'csaiRequestCounts', 'playerBufferState'],
-        { globals: { fetch: async (...args) => { calls.push(args); return 'ok'; } } },
+        [
+            'hookFetch',
+            'maskAsNative',
+            'postTwitchWorkerMessage',
+            'twitchWorkers',
+            'countCsaiRequest',
+            'csaiRequestCounts',
+            'playerBufferState',
+        ],
+        {
+            globals: {
+                fetch: async (...args) => {
+                    calls.push(args);
+                    return 'ok';
+                },
+            },
+        },
     );
     page.hookFetch();
     let threw = null;
-    try { await page.fetch('https://gql.twitch.tv/gql'); } catch (e) { threw = e; }
+    try {
+        await page.fetch('https://gql.twitch.tv/gql');
+    } catch (e) {
+        threw = e;
+    }
     assertEq(threw, null, 'GQL fetch without an init object does not throw in the hook');
     assertEq(calls.length, 1, 'request is passed through to the real fetch');
-    await page.fetch('https://gql.twitch.tv/gql', { headers: { 'Client-Version': 'v1', 'X-Device-Id': 'dev1' }, body: '{}' });
+    await page.fetch('https://gql.twitch.tv/gql', {
+        headers: { 'Client-Version': 'v1', 'X-Device-Id': 'dev1' },
+        body: '{}',
+    });
     assertEq(page.ClientVersion, 'v1', 'captures Client-Version from GQL request headers');
     assertEq(page.GQLDeviceID, 'dev1', 'captures X-Device-Id from GQL request headers');
 });
@@ -563,7 +676,12 @@ asyncTests.push(async () => {
 // ============================================================
 (async () => {
     for (const run of asyncTests) {
-        try { await run(); } catch (e) { failed++; console.error('FAIL: async test threw', e); }
+        try {
+            await run();
+        } catch (e) {
+            failed++;
+            console.error('FAIL: async test threw', e);
+        }
     }
     console.log('\n' + passed + ' passed, ' + failed + ' failed');
     process.exit(failed > 0 ? 1 : 0);

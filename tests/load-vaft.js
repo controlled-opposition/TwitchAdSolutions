@@ -60,7 +60,9 @@ function loadVaft(names, options = {}) {
     const pick = (name) => {
         const matches = declarations.get(name) || [];
         if (matches.length !== 1) {
-            throw new Error(`load-vaft: expected exactly one declaration of '${name}' in vaft.user.js, found ${matches.length}`);
+            throw new Error(
+                `load-vaft: expected exactly one declaration of '${name}' in vaft.user.js, found ${matches.length}`,
+            );
         }
         const match = matches[0];
         if (match.type === 'FunctionDeclaration') {

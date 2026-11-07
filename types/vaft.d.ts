@@ -75,11 +75,14 @@ declare var StreamInfoMaxAgeMs: number;
 // ---------------------------------------------------------------------------
 
 /** In-flight GQL requests relayed to the page, by request id. */
-declare var pendingFetchRequests: Map<string, {
-    resolve: (response: Response) => void;
-    reject: (error: Error) => void;
-    timeoutId: ReturnType<typeof setTimeout>;
-}>;
+declare var pendingFetchRequests: Map<
+    string,
+    {
+        resolve: (response: Response) => void;
+        reject: (error: Error) => void;
+        timeoutId: ReturnType<typeof setTimeout>;
+    }
+>;
 
 // ---------------------------------------------------------------------------
 // Stream state
@@ -219,17 +222,17 @@ interface WorkerFetchRequest {
 /** The page's answer to a WorkerFetchRequest. */
 type WorkerFetchResponse =
     | {
-        id: string;
-        status: number;
-        statusText: string;
-        ok: boolean;
-        redirected: boolean;
-        type: ResponseType;
-        url: string;
-        headers: Record<string, string>;
-        body: string;
-        error?: undefined;
-    }
+          id: string;
+          status: number;
+          statusText: string;
+          ok: boolean;
+          redirected: boolean;
+          type: ResponseType;
+          url: string;
+          headers: Record<string, string>;
+          body: string;
+          error?: undefined;
+      }
     | { id: string; error: string };
 
 /**
