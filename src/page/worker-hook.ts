@@ -2,6 +2,7 @@ import { pickSharedConfig } from '../shared/config.ts';
 import type { WorkerFetchRequest, WorkerFetchResponse, WorkerInit, WorkerToPageMessage } from '../shared/types.ts';
 import { getWasmWorkerJs } from '../shared/wasm-worker.ts';
 import { cancelDriftCorrection } from './drift.ts';
+import { installHook } from '../shared/hook.ts';
 import { maskAsNative } from './mask.ts';
 import { updateAdblockBanner } from './overlay.ts';
 import { doTwitchPlayerTask } from './player.ts';
@@ -90,11 +91,14 @@ export function hookWindowWorker() {
     if (!URL.revokeObjectURL.__tasMasked) {
         const realRevokeObjectURL = URL.revokeObjectURL;
         originalRevokeObjectURL = realRevokeObjectURL;
-        URL.revokeObjectURL = maskAsNative(function (this: typeof URL, url) {
+        const hook = maskAsNative(function (this: typeof URL, url: string) {
             if (url === injectedBlobUrl) return;
             return realRevokeObjectURL.call(this, url);
         }, 'revokeObjectURL');
-        URL.revokeObjectURL.__tasMasked = true;
+        hook.__tasMasked = true;
+        // Without it Twitch may revoke the injected blob URL early; the worker has normally
+        // started by then, so this is logged and otherwise ignored.
+        installHook(URL, 'revokeObjectURL', hook, 'URL.revokeObjectURL');
     }
     const reinsert = getWorkersForReinsert(window.Worker);
     const cleanWorker = getCleanWorker(window.Worker) || window.Worker;

@@ -1,5 +1,6 @@
-import { playerBufferState, runtime, state } from './state.ts';
+import { installHook } from '../shared/hook.ts';
 import { maskAsNative } from './mask.ts';
+import { playerBufferState, runtime, state } from './state.ts';
 
 // Set up visibility overrides and localStorage hooks to preserve player state across reloads
 export function onContentLoaded() {
@@ -44,7 +45,7 @@ export function onContentLoaded() {
             cachedValues.set(keysToCache[i], localStorage.getItem(keysToCache[i]));
         }
         const realSetItem = localStorage.setItem;
-        localStorage.setItem = maskAsNative(function (this: Storage, key, value) {
+        const setItemHook = maskAsNative(function (this: Storage, key: string, value: string) {
             if (cachedValues.has(key)) {
                 cachedValues.set(key, value);
             }
@@ -52,16 +53,21 @@ export function onContentLoaded() {
             realSetItem.apply(this, arguments as any);
         }, 'setItem');
         const realGetItem = localStorage.getItem;
-        localStorage.getItem = maskAsNative(function (this: Storage, key) {
+        const getItemHook = maskAsNative(function (this: Storage, key: string) {
             if (cachedValues.has(key)) {
                 return cachedValues.get(key);
             }
             // biome-ignore lint/suspicious/noExplicitAny: forwards the caller's arguments untouched (the real setItem/getItem has overloads)
             return realGetItem.apply(this, arguments as any);
         }, 'getItem');
-        if (localStorage.getItem === realGetItem) {
-            // These hooks are useful to preserve player state on player reload
-            // Firefox doesn't allow hooking of localStorage functions but chrome does
+        // These hooks preserve player state across player reloads. Firefox doesn't allow hooking
+        // localStorage functions (the assignment stores an item instead); Chrome does. getItem is
+        // only hooked once setItem is: a getItem hook alone would serve cached values that never
+        // see Twitch's writes. When either is missing, reloads write the keys directly.
+        const hooked =
+            installHook(localStorage, 'setItem', setItemHook, 'localStorage.setItem') &&
+            installHook(localStorage, 'getItem', getItemHook, 'localStorage.getItem');
+        if (!hooked) {
             runtime.localStorageHookFailed = true;
         }
     } catch (err) {

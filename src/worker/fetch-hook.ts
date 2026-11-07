@@ -1,11 +1,13 @@
+import { installHook } from '../shared/hook.ts';
 import type { ResolutionInfo, StreamInfo } from '../shared/types.ts';
 import { processM3U8 } from './m3u8.ts';
 import { getServerTimeFromM3u8, parseAttributes, replaceServerTimeInM3u8, videoCodecFamily } from './playlist.ts';
 import { createStreamInfo } from './stream-info.ts';
 import { state } from './state.ts';
 
-// Hook fetch() in the worker scope to intercept m3u8 playlist requests and ad segments
-export function hookWorkerFetch() {
+// Hook fetch() in the worker scope to intercept m3u8 playlist requests and ad segments.
+// Returns whether the hook is in place.
+export function hookWorkerFetch(): boolean {
     console.log('[AD DEBUG] hookWorkerFetch (vaft)');
     const BLANK_MP4 = new Blob(
         [
@@ -19,7 +21,7 @@ export function hookWorkerFetch() {
         { type: 'video/mp4' },
     );
     const realFetch = fetch;
-    self.fetch = async function (this: unknown, url, options) {
+    const hook = async function (this: unknown, url: RequestInfo | URL, options?: RequestInit): Promise<Response> {
         if (typeof url === 'string') {
             if (state.AdSegmentCache.has(url)) {
                 return new Response(BLANK_MP4);
@@ -266,4 +268,5 @@ export function hookWorkerFetch() {
         // biome-ignore lint/suspicious/noExplicitAny: forwards the caller's arguments untouched (the real fetch has overloads)
         return realFetch.apply(this, arguments as any);
     };
+    return installHook(self, 'fetch', hook, 'worker fetch');
 }

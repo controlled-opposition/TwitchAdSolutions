@@ -1,4 +1,5 @@
 // Page bundle entry: becomes vaft/vaft.user.js (scripts/build.js adds the userscript header).
+import { installHook } from '../shared/hook.ts';
 import { monitorPlayerBuffering } from './buffer-monitor.ts';
 import { hookFetch, hookXhr } from './fetch-hook.ts';
 import { doTwitchPlayerTask } from './player.ts';
@@ -7,7 +8,7 @@ import { loadLocalStorageConfig, onContentLoaded } from './storage.ts';
 import { hookWindowWorker } from './worker-hook.ts';
 import { postTwitchWorkerMessage } from './workers.ts';
 
-const ourTwitchAdSolutionsVersion = 95; // Used to prevent conflicts with outdated versions of the scripts
+const ourTwitchAdSolutionsVersion = 96; // Used to prevent conflicts with outdated versions of the scripts
 
 function main() {
     // Skip injection in nested frames that aren't legitimate Twitch embed contexts.
@@ -71,10 +72,18 @@ function main() {
         );
         return;
     }
-    window.twitchAdSolutionsVersion = ourTwitchAdSolutionsVersion;
-    window.reloadTwitchPlayer = () => {
-        doTwitchPlayerTask(false, true);
-    };
+    // installHook rather than assignment for these globals: if a property was left locked
+    // (another copy, another extension) the assignment would throw under strict mode and stop
+    // vaft starting; the debug helpers are not worth that.
+    installHook(window, 'twitchAdSolutionsVersion', ourTwitchAdSolutionsVersion, 'window.twitchAdSolutionsVersion');
+    installHook(
+        window,
+        'reloadTwitchPlayer',
+        () => {
+            doTwitchPlayerTask(false, true);
+        },
+        'window.reloadTwitchPlayer',
+    );
     loadLocalStorageConfig();
     console.log(
         '[AD DEBUG] Config: ReloadPlayerAfterAd = ' +
@@ -98,16 +107,28 @@ function main() {
             onContentLoaded();
         });
     }
-    window.simulateAds = (depth) => {
-        if (depth === undefined || depth < 0) {
-            console.log('Ad depth parameter required (0 = no simulated ad, 1+ = use backup player for given depth)');
-            return;
-        }
-        postTwitchWorkerMessage('SimulateAds', depth);
-    };
-    window.allSegmentsAreAdSegments = () => {
-        postTwitchWorkerMessage('AllSegmentsAreAdSegments');
-    };
+    installHook(
+        window,
+        'simulateAds',
+        (depth?: number) => {
+            if (depth === undefined || depth < 0) {
+                console.log(
+                    'Ad depth parameter required (0 = no simulated ad, 1+ = use backup player for given depth)',
+                );
+                return;
+            }
+            postTwitchWorkerMessage('SimulateAds', depth);
+        },
+        'window.simulateAds',
+    );
+    installHook(
+        window,
+        'allSegmentsAreAdSegments',
+        () => {
+            postTwitchWorkerMessage('AllSegmentsAreAdSegments');
+        },
+        'window.allSegmentsAreAdSegments',
+    );
 }
 
 main();

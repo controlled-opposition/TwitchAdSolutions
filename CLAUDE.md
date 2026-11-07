@@ -22,7 +22,8 @@ The worker is a separate esbuild bundle. The build splices it into the userscrip
 - Worker code can import anything under `src/worker/` and `src/shared/`; the bundle is self-contained, so there is no outer-scope rule any more. It cannot import from `src/page/`, and `src/worker/tsconfig.json` (webworker lib) rejects `window`/`document`.
 - To pass a new page setting to the worker, add it to `SharedConfig` (`src/shared/types.ts`) and `defaultSharedConfig()`. Both `state` objects spread the defaults, so the page reads it from localStorage and the worker receives it in `init.config`.
 - The worker entry runs Twitch's own worker script with an indirect eval (`(0, eval)(...)`) so it lands in the worker's global scope, as it would as its own worker script.
-- The output is sloppy-mode on purpose (`--tsconfig-raw={}` in the build): the script always ran sloppy, where assigning to a property another extension made read-only fails silently instead of throwing.
+- The output is strict mode (since v69.1.0). The build puts `"use strict"` as the first statement of each IIFE, page and worker, so it survives a userscript manager wrapping the script and the worker being shipped as `runWorker`'s source text. Twitch's worker code stays sloppy: indirect eval doesn't inherit strictness.
+- Under strict mode, assigning to a property another extension (or the browser) made read-only throws. Install every hook and every `window.*` global through `installHook(target, key, fn, label)` (`src/shared/hook.ts`), never by plain assignment. It falls back to redefining a configurable own property, logs when the property can't be replaced, and returns whether the hook is in place, so the caller can carry on unhooked: the worker still runs Twitch's code without its fetch hook (stream plays, with ads), the page skips the header capture or CSAI counts, and localStorage falls back to `localStorageHookFailed`. `maskAsNative` defines `toString` rather than assigning it, for the same reason.
 - `alreadyHooked` detection relies on the blob text containing `hookWorkerFetch`; a test checks the built blob still does.
 
 ## Versions
@@ -88,7 +89,7 @@ Use the dev shell's esbuild: the up-to-date check compares bytes, so a different
 ## Tests
 
 - `tests/load.js`: `loadModules(['src/worker/ads.ts', ...], { globals })` bundles the listed modules and evaluates them in a fresh vm context, so each call gets its own module state. Exports come back as properties (`vaft.stripAdSegments`, `vaft.state.V2API = true`); `vaft.context` is the global (`self`/`window`).
-- `tests/harness.js`: loads a built userscript into a mock page, captures the worker blob it injects, and runs it in a mock worker with a scripted network and GQL.
+- `tests/harness.js`: loads a built userscript into a mock page, captures the worker blob it injects, and runs it in a mock worker with a scripted network and GQL. A `setup(global)` option prepares either global first (e.g. locks `fetch` the way another extension might).
 - `tests/scenarios.js`: scripted ad-break scenarios (fake clock) that produce a transcript of returned playlists and worker messages. Running the same scenarios against two builds compares their behaviour; that is how this TypeScript conversion was checked against v68.5.8.
 
 ## Lint / Format (Biome)

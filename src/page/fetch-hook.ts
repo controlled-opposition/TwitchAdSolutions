@@ -1,5 +1,6 @@
-import { playerBufferState, state } from './state.ts';
+import { installHook } from '../shared/hook.ts';
 import { maskAsNative } from './mask.ts';
+import { playerBufferState, state } from './state.ts';
 import { postTwitchWorkerMessage } from './workers.ts';
 
 // CSAI ad-request counters, keyed by type and split on whether a detected ad break was in
@@ -38,11 +39,10 @@ export function countCsaiRequest(csaiType: string, transport: 'fetch' | 'xhr') {
 }
 // Hook fetch() in the window scope to capture auth headers and modify player type requests
 export function hookFetch() {
-    console.log('[AD DEBUG] Window fetch hook installed');
     let hasLoggedHeaders = false;
     const realFetch = window.fetch;
-    window.realFetch = realFetch;
-    window.fetch = maskAsNative(function (this: unknown, url, init) {
+    installHook(window, 'realFetch', realFetch, 'window.realFetch');
+    const hook = maskAsNative(function (this: unknown, url: RequestInfo | URL, init?: RequestInit) {
         if (typeof url === 'string') {
             if (url.includes('gql')) {
                 // init can be absent (a bare fetch(url) used to throw here and fail the request)
@@ -149,11 +149,16 @@ export function hookFetch() {
         // biome-ignore lint/suspicious/noExplicitAny: forwards the caller's arguments untouched (the real fetch has overloads)
         return realFetch.apply(this, arguments as any);
     }, 'fetch');
+    // Without it vaft misses header updates for the worker's GQL requests and the CSAI counts;
+    // ad stripping itself happens in the worker and carries on.
+    if (installHook(window, 'fetch', hook, 'window fetch')) {
+        console.log('[AD DEBUG] Window fetch hook installed');
+    }
 }
 // Hook XHR to detect CSAI ad requests that bypass fetch
 export function hookXhr() {
     const realXHROpen = XMLHttpRequest.prototype.open;
-    XMLHttpRequest.prototype.open = maskAsNative(function (this: XMLHttpRequest, _method: string, url: string | URL) {
+    const hook = maskAsNative(function (this: XMLHttpRequest, _method: string, url: string | URL) {
         if (typeof url === 'string' && url.includes('edge.ads.twitch.tv')) {
             const csaiType = url.includes('bp=midroll')
                 ? 'midroll'
@@ -164,5 +169,7 @@ export function hookXhr() {
         }
         // biome-ignore lint/suspicious/noExplicitAny: forwards whichever open() overload the caller used
         return realXHROpen.apply(this, arguments as any);
-    }, 'open');
+    }, 'open') as typeof realXHROpen;
+    // Only feeds the CSAI counts; nothing else depends on it.
+    installHook(XMLHttpRequest.prototype, 'open', hook, 'XMLHttpRequest.open');
 }

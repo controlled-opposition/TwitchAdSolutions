@@ -25,7 +25,9 @@ function makeStorage(initial = {}) {
 /**
  * Load the userscript into a mock page and return the worker blob it injects for a Twitch worker.
  * @param {string} scriptPath
- * @param {{ localStorage?: Record<string, string>, console?: object }} [options]
+ * @param {{ localStorage?: Record<string, string>, console?: object, setup?: (page: object) => void }} [options]
+ *   `setup` runs against the page global before the script (e.g. to lock a property as another
+ *   extension might).
  */
 export function injectWorker(scriptPath, options = {}) {
     const blobs = [];
@@ -88,6 +90,7 @@ export function injectWorker(scriptPath, options = {}) {
     page.window = page;
     page.frameElement = null;
     page.addEventListener = () => {};
+    options.setup?.(page);
     vm.runInContext(readFileSync(scriptPath, 'utf8'), page, { filename: scriptPath });
     new page.Worker('blob:https://www.twitch.tv/twitch-worker');
     if (blobs.length !== 1) throw new Error('expected one injected worker blob, got ' + blobs.length);
@@ -103,7 +106,8 @@ export function injectWorker(scriptPath, options = {}) {
  *   twitchWorkerJs?: string,
  *   console?: object,
  *   now?: () => number,
- * }} options
+ *   setup?: (worker: object) => void,
+ * }} options `setup` runs against the worker global before the blob.
  */
 export function startWorker(blobSource, options) {
     const posted = [];
@@ -169,6 +173,7 @@ export function startWorker(blobSource, options) {
             );
         }
     };
+    options.setup?.(worker);
     vm.runInContext(blobSource, worker, { filename: 'worker-blob.js' });
     return {
         context: worker,

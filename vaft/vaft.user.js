@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAdSolutions (vaft)
 // @namespace    https://github.com/controlled-opposition/TwitchAdSolutions
-// @version      69.0.0
+// @version      69.1.0
 // @description  Multiple solutions for blocking Twitch ads (vaft)
 // @updateURL    https://github.com/controlled-opposition/TwitchAdSolutions/raw/master/vaft/vaft.user.js
 // @downloadURL  https://github.com/controlled-opposition/TwitchAdSolutions/raw/master/vaft/vaft.user.js
@@ -11,6 +11,40 @@
 // @grant        none
 // ==/UserScript==
 (() => {
+  "use strict";
+  // src/shared/hook.ts
+  function installHook(target, key, fn, label) {
+    try {
+      target[key] = fn;
+    } catch {
+    }
+    if (target[key] !== fn) {
+      try {
+        const desc = Object.getOwnPropertyDescriptor(target, key);
+        if (desc?.configurable) {
+          Object.defineProperty(target, key, {
+            value: fn,
+            writable: true,
+            configurable: true,
+            enumerable: desc.enumerable
+          });
+        }
+      } catch {
+      }
+    }
+    let hooked = false;
+    try {
+      hooked = target[key] === fn;
+    } catch {
+    }
+    if (!hooked) {
+      console.log(
+        "[AD DEBUG] Could not hook " + label + ": the browser or another extension does not let it be replaced"
+      );
+    }
+    return hooked;
+  }
+
   // src/page/twitch.ts
   var cachedRootNode = null;
   var firstPlayerNullAt = 0;
@@ -891,7 +925,14 @@
 
   // src/page/mask.ts
   function maskAsNative(fn, name) {
-    fn.toString = () => "function " + name + "() { [native code] }";
+    try {
+      Object.defineProperty(fn, "toString", {
+        value: () => "function " + name + "() { [native code] }",
+        writable: true,
+        configurable: true
+      });
+    } catch {
+    }
     return fn;
   }
 
@@ -914,11 +955,10 @@
     );
   }
   function hookFetch() {
-    console.log("[AD DEBUG] Window fetch hook installed");
     let hasLoggedHeaders = false;
     const realFetch = window.fetch;
-    window.realFetch = realFetch;
-    window.fetch = maskAsNative(function(url, init) {
+    installHook(window, "realFetch", realFetch, "window.realFetch");
+    const hook = maskAsNative(function(url, init) {
       if (typeof url === "string") {
         if (url.includes("gql")) {
           const headers = init?.headers || {};
@@ -990,16 +1030,20 @@
       }
       return realFetch.apply(this, arguments);
     }, "fetch");
+    if (installHook(window, "fetch", hook, "window fetch")) {
+      console.log("[AD DEBUG] Window fetch hook installed");
+    }
   }
   function hookXhr() {
     const realXHROpen = XMLHttpRequest.prototype.open;
-    XMLHttpRequest.prototype.open = maskAsNative(function(_method, url) {
+    const hook = maskAsNative(function(_method, url) {
       if (typeof url === "string" && url.includes("edge.ads.twitch.tv")) {
         const csaiType = url.includes("bp=midroll") ? "midroll" : url.includes("bp=preroll") ? "preroll" : "unknown";
         countCsaiRequest(csaiType, "xhr");
       }
       return realXHROpen.apply(this, arguments);
     }, "open");
+    installHook(XMLHttpRequest.prototype, "open", hook, "XMLHttpRequest.open");
   }
 
   // src/page/storage.ts
@@ -1041,20 +1085,21 @@
         cachedValues.set(keysToCache[i], localStorage.getItem(keysToCache[i]));
       }
       const realSetItem = localStorage.setItem;
-      localStorage.setItem = maskAsNative(function(key, value) {
+      const setItemHook = maskAsNative(function(key, value) {
         if (cachedValues.has(key)) {
           cachedValues.set(key, value);
         }
         realSetItem.apply(this, arguments);
       }, "setItem");
       const realGetItem = localStorage.getItem;
-      localStorage.getItem = maskAsNative(function(key) {
+      const getItemHook = maskAsNative(function(key) {
         if (cachedValues.has(key)) {
           return cachedValues.get(key);
         }
         return realGetItem.apply(this, arguments);
       }, "getItem");
-      if (localStorage.getItem === realGetItem) {
+      const hooked = installHook(localStorage, "setItem", setItemHook, "localStorage.setItem") && installHook(localStorage, "getItem", getItemHook, "localStorage.getItem");
+      if (!hooked) {
         runtime.localStorageHookFailed = true;
       }
     } catch (err) {
@@ -1169,6 +1214,7 @@
   // src/page/worker-bundle.ts
   function runWorker(__vaftInit) {
 (() => {
+  "use strict";
   // src/shared/wasm-worker.ts
   var cache = /* @__PURE__ */ Object.create(null);
   function getWasmWorkerJs(twitchBlobUrl) {
@@ -1182,6 +1228,39 @@
     const text = req.responseText;
     cache[twitchBlobUrl] = text;
     return text;
+  }
+
+  // src/shared/hook.ts
+  function installHook(target, key, fn, label) {
+    try {
+      target[key] = fn;
+    } catch {
+    }
+    if (target[key] !== fn) {
+      try {
+        const desc = Object.getOwnPropertyDescriptor(target, key);
+        if (desc?.configurable) {
+          Object.defineProperty(target, key, {
+            value: fn,
+            writable: true,
+            configurable: true,
+            enumerable: desc.enumerable
+          });
+        }
+      } catch {
+      }
+    }
+    let hooked2 = false;
+    try {
+      hooked2 = target[key] === fn;
+    } catch {
+    }
+    if (!hooked2) {
+      console.log(
+        "[AD DEBUG] Could not hook " + label + ": the browser or another extension does not let it be replaced"
+      );
+    }
+    return hooked2;
   }
 
   // src/shared/config.ts
@@ -2414,7 +2493,7 @@
       { type: "video/mp4" }
     );
     const realFetch = fetch;
-    self.fetch = async function(url, options) {
+    const hook = async function(url, options) {
       if (typeof url === "string") {
         if (state.AdSegmentCache.has(url)) {
           return new Response(BLANK_MP4);
@@ -2600,6 +2679,7 @@
       }
       return realFetch.apply(this, arguments);
     };
+    return installHook(self, "fetch", hook, "worker fetch");
   }
 
   // src/worker/index.ts
@@ -2678,7 +2758,15 @@
       console.log("AllSegmentsAreAdSegments: " + state.AllSegmentsAreAdSegments);
     }
   });
-  hookWorkerFetch();
+  var hooked = false;
+  try {
+    hooked = hookWorkerFetch();
+  } catch (e) {
+    console.error("[AD DEBUG] Worker fetch hook setup failed:", e);
+  }
+  if (!hooked) {
+    console.log("[AD DEBUG] Worker fetch not hooked: ads will not be blocked in this worker");
+  }
   try {
     (0, eval)(workerString);
   } catch (e) {
@@ -2765,11 +2853,12 @@
     if (!URL.revokeObjectURL.__tasMasked) {
       const realRevokeObjectURL = URL.revokeObjectURL;
       originalRevokeObjectURL = realRevokeObjectURL;
-      URL.revokeObjectURL = maskAsNative(function(url) {
+      const hook = maskAsNative(function(url) {
         if (url === injectedBlobUrl) return;
         return realRevokeObjectURL.call(this, url);
       }, "revokeObjectURL");
-      URL.revokeObjectURL.__tasMasked = true;
+      hook.__tasMasked = true;
+      installHook(URL, "revokeObjectURL", hook, "URL.revokeObjectURL");
     }
     const reinsert = getWorkersForReinsert(window.Worker);
     const cleanWorker = getCleanWorker(window.Worker) || window.Worker;
@@ -2906,7 +2995,7 @@
   }
 
   // src/page/index.ts
-  var ourTwitchAdSolutionsVersion = 95;
+  var ourTwitchAdSolutionsVersion = 96;
   function main() {
     let _isNested = false;
     try {
@@ -2939,10 +3028,15 @@
       );
       return;
     }
-    window.twitchAdSolutionsVersion = ourTwitchAdSolutionsVersion;
-    window.reloadTwitchPlayer = () => {
-      doTwitchPlayerTask(false, true);
-    };
+    installHook(window, "twitchAdSolutionsVersion", ourTwitchAdSolutionsVersion, "window.twitchAdSolutionsVersion");
+    installHook(
+      window,
+      "reloadTwitchPlayer",
+      () => {
+        doTwitchPlayerTask(false, true);
+      },
+      "window.reloadTwitchPlayer"
+    );
     loadLocalStorageConfig();
     console.log(
       "[AD DEBUG] Config: ReloadPlayerAfterAd = " + state.ReloadPlayerAfterAd + ", ForceAccessTokenPlayerType = " + state.ForceAccessTokenPlayerType + ", PinBackupPlayerType = " + state.PinBackupPlayerType
@@ -2960,16 +3054,28 @@
         onContentLoaded();
       });
     }
-    window.simulateAds = (depth) => {
-      if (depth === void 0 || depth < 0) {
-        console.log("Ad depth parameter required (0 = no simulated ad, 1+ = use backup player for given depth)");
-        return;
-      }
-      postTwitchWorkerMessage("SimulateAds", depth);
-    };
-    window.allSegmentsAreAdSegments = () => {
-      postTwitchWorkerMessage("AllSegmentsAreAdSegments");
-    };
+    installHook(
+      window,
+      "simulateAds",
+      (depth) => {
+        if (depth === void 0 || depth < 0) {
+          console.log(
+            "Ad depth parameter required (0 = no simulated ad, 1+ = use backup player for given depth)"
+          );
+          return;
+        }
+        postTwitchWorkerMessage("SimulateAds", depth);
+      },
+      "window.simulateAds"
+    );
+    installHook(
+      window,
+      "allSegmentsAreAdSegments",
+      () => {
+        postTwitchWorkerMessage("AllSegmentsAreAdSegments");
+      },
+      "window.allSegmentsAreAdSegments"
+    );
   }
   main();
 })();

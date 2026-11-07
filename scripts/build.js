@@ -23,17 +23,30 @@ const target = join(root, 'vaft', 'vaft.user.js');
 // re-indenting would change any multi-line template literal in it.
 const PLACEHOLDER = /^[ \t]*__VAFT_WORKER_BUNDLE__\(\);\n/m;
 
-// --tsconfig-raw={}: don't let tsconfig's `strict` add "use strict". The script has always run
-// in sloppy mode, where e.g. assigning to a fetch/open another extension made read-only fails
-// quietly; in strict mode it throws and takes down the hook (in the worker, Twitch's player too).
+// The output is strict mode: alwaysStrict makes esbuild emit "use strict". Hooks are installed
+// through installHook() (src/shared/hook.ts), so a property another extension made read-only is
+// logged and handled instead of throwing. The raw tsconfig also keeps esbuild from reading
+// tsconfig.json, so the output doesn't shift with type-checking settings.
 export const esbuildArgs = [
     '--bundle',
     '--format=iife',
     '--target=es2022',
     '--charset=utf8',
     '--log-level=warning',
-    '--tsconfig-raw={}',
+    '--tsconfig-raw={"compilerOptions":{"alwaysStrict":true}}',
 ];
+
+// esbuild puts "use strict" above the IIFE, at the top of the file. Move it to the first line of
+// the IIFE body so it holds wherever the code ends up: a userscript manager that puts its own
+// code before the script would turn a file-level directive into a no-op string, and the worker
+// bundle is spliced into runWorker() and shipped as that function's source text.
+const FILE_DIRECTIVE = /^"use strict";\n\(\(\) => \{\n/m;
+function strictIife(code, name) {
+    if (!FILE_DIRECTIVE.test(code)) {
+        throw new Error(`${name} bundle: expected esbuild's "use strict" directive above the IIFE`);
+    }
+    return code.replace(FILE_DIRECTIVE, '(() => {\n  "use strict";\n');
+}
 
 function esbuildRun(entry, extraArgs = []) {
     return execFileSync(esbuild, [entry, ...esbuildArgs, ...extraArgs], {
@@ -44,9 +57,9 @@ function esbuildRun(entry, extraArgs = []) {
 }
 
 export function build() {
-    const worker = esbuildRun('src/worker/index.ts');
+    const worker = strictIife(esbuildRun('src/worker/index.ts'), 'worker');
     const header = readFileSync(join(root, 'src', 'meta.js'), 'utf8').trimEnd();
-    const page = esbuildRun('src/page/index.ts', [`--banner:js=${header}`]);
+    const page = strictIife(esbuildRun('src/page/index.ts', [`--banner:js=${header}`]), 'page');
     const parts = page.split(PLACEHOLDER);
     if (parts.length !== 2) {
         throw new Error(`expected one __VAFT_WORKER_BUNDLE__() call in the page bundle, found ${parts.length - 1}`);

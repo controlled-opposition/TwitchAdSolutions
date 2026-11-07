@@ -3,8 +3,9 @@
 //
 // Unit tests load src/ modules through tests/load.js (fresh module state per load). The
 // end-to-end tests at the bottom run the built vaft/vaft.user.js through tests/harness.js.
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import vm from 'node:vm';
 import { injectWorker, startWorker } from './harness.js';
 import { loadModules, ROOT } from './load.js';
 import { runScenario, SCENARIOS } from './scenarios.js';
@@ -615,9 +616,65 @@ asyncTests.push(async () => {
 });
 
 // ============================================================
+// installHook / maskAsNative: hooks under strict mode
+// ============================================================
+{
+    console.log('--- installHook ---');
+    const lines = [];
+    const h = loadModules(['src/shared/hook.ts', 'src/page/mask.ts'], {
+        console: { log: (m) => lines.push(String(m)) },
+    });
+    const run = (code) => vm.runInContext(code, h.context);
+    const fn = () => 'hooked';
+
+    const plain = run('({ m() {} })');
+    assertEq(h.installHook(plain, 'm', fn, 'plain'), true, 'writable property: hooked');
+    assertEq(plain.m, fn, 'writable property: replaced');
+
+    const readOnly = run("Object.defineProperty({}, 'm', { value() {}, writable: false, configurable: true })");
+    assertEq(h.installHook(readOnly, 'm', fn, 'readOnly'), true, 'read-only but configurable: hooked');
+    assertEq(readOnly.m, fn, 'read-only but configurable: redefined (sloppy mode used to miss this silently)');
+
+    const getterOnly = run("Object.defineProperty({}, 'm', { get() { return 1; }, configurable: true })");
+    assertEq(h.installHook(getterOnly, 'm', fn, 'getterOnly'), true, 'getter-only but configurable: hooked');
+
+    const locked = run("Object.defineProperty({}, 'm', { value: 1, writable: false, configurable: false })");
+    let threw = false;
+    let result;
+    try {
+        result = h.installHook(locked, 'm', fn, 'locked thing');
+    } catch {
+        threw = true;
+    }
+    assertEq(threw, false, 'locked property: does not throw under strict mode');
+    assertEq(result, false, 'locked property: reports not hooked');
+    assertEq(locked.m, 1, 'locked property: left alone');
+    assert(
+        lines.some((l) => l.includes('Could not hook locked thing')),
+        'locked property: logged',
+    );
+
+    const inherited = run('Object.create(Object.freeze({ m() {} }))');
+    assertEq(
+        h.installHook(inherited, 'm', fn, 'inherited'),
+        false,
+        'read-only inherited property: reports not hooked (no own-property redefinition)',
+    );
+
+    run('Object.freeze(Function.prototype)');
+    const masked = h.maskAsNative(run('(function () {})'), 'fetch');
+    assertEq(
+        masked.toString(),
+        'function fetch() { [native code] }',
+        'maskAsNative works when Function.prototype is frozen',
+    );
+}
+
+// ============================================================
 // End to end: the built userscript (vaft/vaft.user.js)
 // ============================================================
 const BUILT = join(ROOT, 'vaft', 'vaft.user.js');
+const quiet = { log() {}, info() {}, warn() {}, error() {}, debug() {} };
 
 asyncTests.push(async () => {
     console.log('--- built userscript: injected worker ---');
@@ -646,6 +703,65 @@ asyncTests.push(async () => {
         !custom.requested.some((u) => u.includes('parent_domains')),
         'ForceAccessTokenPlayerType from localStorage reached the worker (parent_domains stripped)',
     );
+});
+
+asyncTests.push(async () => {
+    console.log('--- built userscript: strict mode and locked properties ---');
+    if (!existsSync(BUILT)) return;
+    const built = readFileSync(BUILT, 'utf8');
+    assert(
+        built.includes('// ==/UserScript==\n(() => {\n  "use strict";\n'),
+        'page bundle: "use strict" is the first statement of its IIFE',
+    );
+    const blob = injectWorker(BUILT);
+    assert(
+        blob.startsWith('(function runWorker(__vaftInit) {\n(() => {\n  "use strict";\n'),
+        'worker blob: "use strict" is the first statement of the worker IIFE',
+    );
+
+    // Another extension locked the page's fetch and XHR open: vaft logs it and still injects.
+    const lock = (obj, key) =>
+        Object.defineProperty(obj, key, { value: obj[key], writable: false, configurable: false });
+    const pageLog = [];
+    const lockedBlob = injectWorker(BUILT, {
+        console: { ...quiet, log: (m) => pageLog.push(String(m)) },
+        setup(page) {
+            lock(page, 'fetch');
+            lock(page.XMLHttpRequest.prototype, 'open');
+        },
+    });
+    assert(lockedBlob.includes('hookWorkerFetch'), 'locked page fetch/open: worker still injected');
+    assert(
+        pageLog.some((l) => l.includes('Could not hook window fetch')) &&
+            pageLog.some((l) => l.includes('Could not hook XMLHttpRequest.open')),
+        'locked page fetch/open: logged',
+    );
+    assert(
+        !pageLog.some((l) => l.includes('Window fetch hook installed')),
+        'locked page fetch: not reported as installed',
+    );
+
+    // Worker fetch locked: no ad blocking there, but Twitch's code must still run.
+    const workerLog = [];
+    const network = async () => ({ body: '#EXTM3U' });
+    const lockedWorker = startWorker(blob, {
+        network,
+        console: { ...quiet, log: (m) => workerLog.push(String(m)) },
+        setup: (w) => lock(w, 'fetch'),
+    });
+    assertEq(lockedWorker.context.twitchWorkerLoaded, true, "locked worker fetch: Twitch's worker code still runs");
+    assert(
+        workerLog.some((l) => l.includes('ads will not be blocked in this worker')),
+        'locked worker fetch: logged',
+    );
+
+    // Read-only but configurable (what a careless extension does): redefined, so ads are still
+    // handled. Sloppy mode silently left these unhooked.
+    const roWorker = startWorker(blob, {
+        network,
+        setup: (w) => Object.defineProperty(w, 'fetch', { value: w.fetch, writable: false, configurable: true }),
+    });
+    assert(roWorker.context.fetch.toString().includes('AdSegmentCache'), 'read-only worker fetch: hooked anyway');
 });
 
 asyncTests.push(async () => {

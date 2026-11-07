@@ -102,7 +102,17 @@ self.addEventListener('message', function (e: MessageEvent<PageToWorkerMessage>)
         console.log('AllSegmentsAreAdSegments: ' + state.AllSegmentsAreAdSegments);
     }
 });
-hookWorkerFetch();
+// Whatever happens here, Twitch's code below must still run: an unhooked worker plays the
+// stream with ads, a worker that never runs Twitch's code plays nothing.
+let hooked = false;
+try {
+    hooked = hookWorkerFetch();
+} catch (e) {
+    console.error('[AD DEBUG] Worker fetch hook setup failed:', e);
+}
+if (!hooked) {
+    console.log('[AD DEBUG] Worker fetch not hooked: ads will not be blocked in this worker');
+}
 // Guard the eval — malformed workerString shouldn't silently break
 // Twitch's player logic without a diagnostic. Worker stays alive on
 // throw (vaft hooks installed above), but Twitch's logic wouldn't run.
