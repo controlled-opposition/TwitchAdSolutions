@@ -748,24 +748,28 @@ export async function processM3U8(url: string, textStr: string, realFetch: typeo
             if (!hadStrippedSegments) {
                 console.log('[AD DEBUG] CSAI-only ad break (stripped 0) — clearing backup without player action');
                 streamInfo.IsUsingModifiedM3U8 = false;
-                // Exception: if ANY backup was committed during this break (escape hatch
-                // or cycle rescue that didn't meet cycleRescuedCleanly criteria), the
-                // MediaSource buffer has accumulated mixed-source segments (backup-fetched
-                // via alternate player-type access token + native-fetched). Mixing can
-                // cause audio/video track timestamps to diverge, and without a reload the
-                // drift compounds across subsequent escape-hatch breaks. Force a hard reload
-                // to flush the MediaSource buffer + refresh the access token.
-                // For autoplay (360p) specifically, the reload also restores Source
-                // quality (autoplay-scoped token only serves 360p variant ladder).
+                // Exception: if a backup was committed during this break (the BackupSwapFirst
+                // swap, escape hatch, or a cycle rescue), reload to return to the player's own
+                // stream.
+                // - Autoplay (360p): hard reload ('early'). Its token only serves the 360p
+                //   variant ladder, and only 'early' refreshes the access token to restore Source.
+                // - Other types: issue #129 mode D. Nothing was stripped, so no BLANK_MP4 or
+                //   recovery segments went into the MediaSource and the hard-reload flush is
+                //   unnecessary; it just pays the desktop black-screen + play-icon teardown. Soft
+                //   reload ('post-ad') unless SoftReloadNoStrip is turned off, which restores the
+                //   hard flush for anyone seeing A/V desync after backup-swap breaks.
                 if (streamInfo.LastCommittedBackupPlayerType) {
                     const isAutoplay = streamInfo.LastCommittedBackupPlayerType === 'autoplay';
+                    const soft = !isAutoplay && state.SoftReloadNoStrip;
                     const reason = isAutoplay
                         ? 'autoplay (360p) — restoring Source quality'
                         : streamInfo.LastCommittedBackupPlayerType +
-                          ' — flushing MediaSource to prevent A/V desync accumulation';
+                          (soft
+                              ? ' — soft, nothing was stripped (SoftReloadNoStrip)'
+                              : ' — flushing MediaSource to prevent A/V desync accumulation');
                     console.log('[AD DEBUG] End-of-break reload: ' + reason);
                     streamInfo.LastPlayerReload = Date.now();
-                    postToPage({ key: 'ReloadPlayer', kind: 'early' });
+                    postToPage({ key: 'ReloadPlayer', kind: soft ? 'post-ad' : 'early' });
                 }
             } else {
                 // Skip end-of-break reload when cycle rescue handled the break cleanly:
@@ -786,18 +790,13 @@ export async function processM3U8(url: string, textStr: string, realFetch: typeo
                 if (shouldReload) {
                     streamInfo.IsUsingModifiedM3U8 = false;
                     streamInfo.LastPlayerReload = Date.now();
-                    // Hard reload when buffer may be dirty from strip or m3u8 modification —
-                    // soft reload preserves the existing MediaSource buffer, and any
-                    // timestamp weirdness from strip/BLANK_MP4/recovery injection persists
-                    // across it, causing audio/video desync over time.
-                    // Issue #129 mode D: when the break stripped NO segments (BackupSwapFirst CSAI swap),
-                    // nothing was injected into the MediaSource, so the hard-reload flush is unnecessary and
-                    // just pays the desktop black-screen + play-icon teardown — use a soft reload ('post-ad')
-                    // there. Strip breaks stay hard ('early'). doTwitchPlayerTask maps 'post-ad' → soft.
-                    const reloadKind = state.SoftReloadNoStrip && !hadStrippedSegments ? 'post-ad' : 'early';
+                    // Hard reload: this break stripped segments, and a soft reload keeps the existing
+                    // MediaSource buffer, so timestamp weirdness from strip/BLANK_MP4/recovery
+                    // injection would persist and desync audio/video over time. (No-strip breaks
+                    // take the branch above, where SoftReloadNoStrip applies.)
                     postToPage({
                         key: 'ReloadPlayer',
-                        kind: reloadKind,
+                        kind: 'early',
                     });
                 } else {
                     postToPage({

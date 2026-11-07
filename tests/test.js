@@ -877,6 +877,25 @@ asyncTests.push(async () => {
         stripped.flatMap((t) => t.messages).some((m) => m.key === 'ReloadPlayer' && m.kind === 'early'),
         'all backups ad-laden: early reload requested',
     );
+    // End-of-break reload after a break that stripped nothing but committed a backup (#129 mode D).
+    const endReloadKinds = async (spec) =>
+        (await runScenario(BUILT, spec)).transcript
+            .filter((t) => t.label.startsWith('phase 2'))
+            .flatMap((t) => t.messages)
+            .filter((m) => m.key === 'ReloadPlayer')
+            .map((m) => m.kind);
+    const swap = SCENARIOS['ad break, clean backup (site)'];
+    assertDeepEq(await endReloadKinds(swap), ['post-ad'], 'no-strip backup swap: soft end-of-break reload');
+    assertDeepEq(
+        await endReloadKinds({ ...swap, localStorage: { twitchAdSolutions_softReloadNoStrip: 'false' } }),
+        ['early'],
+        'no-strip backup swap with softReloadNoStrip=false: hard reload',
+    );
+    assertDeepEq(
+        await endReloadKinds({ ...swap, backupAds: { site: 6, popout: 6, mobile_web: 6, embed: 6 } }),
+        ['early'],
+        'no-strip break on the autoplay backup: hard reload (token refresh restores Source quality)',
+    );
 });
 
 // ============================================================

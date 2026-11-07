@@ -170,7 +170,7 @@
       DisableAdSpoofing: true,
       // Default OFF (was ON through v68.2.0). The always-100%-watched + audible + visible spoof beacon pattern may itself fingerprint as anomalous and trigger detection escalation (CSAI reaching the committed backup) — observed correlation in field + TTV-AB maintainer hypothesis. Spoof-accepted (no GQL rejection) does NOT prove not-fingerprinted; Twitch can 200-OK while using the beacon pattern as silent detection input. Opt in by setting twitchAdSolutions_disableAdSpoofing=false to re-enable the GQL ad-tracking beacons (video_ad_impression, video_ad_quartile_complete x 4, video_ad_pod_complete).
       SoftReloadNoStrip: true,
-      // Issue #129 (mode D): post-ad reload uses SOFT reload when the break stripped no segments (BackupSwapFirst CSAI swap). Hard reload's MediaSource flush is only needed after strip injection (BLANK_MP4/recovery) — on a no-strip break it just pays the desktop black-screen + play-icon teardown for nothing. Default on; set twitchAdSolutions_softReloadNoStrip=false to force the old always-hard behavior.
+      // Issue #129 (mode D): the end-of-break reload after a no-strip break that committed a backup (BackupSwapFirst swap) is SOFT, except for an autoplay backup (needs the hard reload's token refresh to leave 360p). Hard reload's MediaSource flush is only needed after strip injection (BLANK_MP4/recovery) — on a no-strip break it just pays the desktop black-screen + play-icon teardown for nothing. Default on; set twitchAdSolutions_softReloadNoStrip=false to force the old always-hard behavior.
       ForceAccessTokenPlayerType: "popout",
       GQLDeviceID: null,
       AuthorizationHeader: void 0,
@@ -1270,7 +1270,7 @@
       DisableAdSpoofing: true,
       // Default OFF (was ON through v68.2.0). The always-100%-watched + audible + visible spoof beacon pattern may itself fingerprint as anomalous and trigger detection escalation (CSAI reaching the committed backup) — observed correlation in field + TTV-AB maintainer hypothesis. Spoof-accepted (no GQL rejection) does NOT prove not-fingerprinted; Twitch can 200-OK while using the beacon pattern as silent detection input. Opt in by setting twitchAdSolutions_disableAdSpoofing=false to re-enable the GQL ad-tracking beacons (video_ad_impression, video_ad_quartile_complete x 4, video_ad_pod_complete).
       SoftReloadNoStrip: true,
-      // Issue #129 (mode D): post-ad reload uses SOFT reload when the break stripped no segments (BackupSwapFirst CSAI swap). Hard reload's MediaSource flush is only needed after strip injection (BLANK_MP4/recovery) — on a no-strip break it just pays the desktop black-screen + play-icon teardown for nothing. Default on; set twitchAdSolutions_softReloadNoStrip=false to force the old always-hard behavior.
+      // Issue #129 (mode D): the end-of-break reload after a no-strip break that committed a backup (BackupSwapFirst swap) is SOFT, except for an autoplay backup (needs the hard reload's token refresh to leave 360p). Hard reload's MediaSource flush is only needed after strip injection (BLANK_MP4/recovery) — on a no-strip break it just pays the desktop black-screen + play-icon teardown for nothing. Default on; set twitchAdSolutions_softReloadNoStrip=false to force the old always-hard behavior.
       ForceAccessTokenPlayerType: "popout",
       GQLDeviceID: null,
       AuthorizationHeader: void 0,
@@ -2251,10 +2251,11 @@
           streamInfo.IsUsingModifiedM3U8 = false;
           if (streamInfo.LastCommittedBackupPlayerType) {
             const isAutoplay = streamInfo.LastCommittedBackupPlayerType === "autoplay";
-            const reason = isAutoplay ? "autoplay (360p) — restoring Source quality" : streamInfo.LastCommittedBackupPlayerType + " — flushing MediaSource to prevent A/V desync accumulation";
+            const soft = !isAutoplay && state.SoftReloadNoStrip;
+            const reason = isAutoplay ? "autoplay (360p) — restoring Source quality" : streamInfo.LastCommittedBackupPlayerType + (soft ? " — soft, nothing was stripped (SoftReloadNoStrip)" : " — flushing MediaSource to prevent A/V desync accumulation");
             console.log("[AD DEBUG] End-of-break reload: " + reason);
             streamInfo.LastPlayerReload = Date.now();
-            postToPage({ key: "ReloadPlayer", kind: "early" });
+            postToPage({ key: "ReloadPlayer", kind: soft ? "post-ad" : "early" });
           }
         } else {
           const cycleRescuedCleanly = streamInfo.CycleRescuedThisBreak && totalAllStrippedPolls <= 2 && streamInfo.EarlyReloadCount === 0;
@@ -2265,10 +2266,9 @@
           if (shouldReload) {
             streamInfo.IsUsingModifiedM3U8 = false;
             streamInfo.LastPlayerReload = Date.now();
-            const reloadKind = state.SoftReloadNoStrip && !hadStrippedSegments ? "post-ad" : "early";
             postToPage({
               key: "ReloadPlayer",
-              kind: reloadKind
+              kind: "early"
             });
           } else {
             postToPage({
