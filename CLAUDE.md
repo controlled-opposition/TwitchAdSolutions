@@ -65,12 +65,17 @@ All logs use `[AD DEBUG]` prefix. Logs in `.toString()` functions must use `cons
 ## Validation
 
 In the Nix dev shell (`nix develop` / direnv):
+- `biome check --write .` — lint + format (CI runs `biome ci .`, which fails on unformatted code or lint errors)
 - `acorn --ecma2022 vaft/vaft.user.js > /dev/null` — syntax
 - `tsc -p .` — type check (must be 0 errors)
 - `node tests/test.js` — unit tests (includes a check that every `${fn.toString()}` worker function loads standalone)
 - `node tests/benchmark.js` — optional perf comparison against the pixeltris baseline
 
-GitHub Actions runs the first three on push/PR.
+GitHub Actions runs all but the benchmark on push/PR.
+
+## Lint / Format (Biome)
+
+`biome.json`: 4-space indent, 120 columns, single quotes, semicolons, trailing commas; recommended lint preset minus `useTemplate`, `useArrowFunction`, `useOptionalChain`, `useLiteralKeys` (style-only churn; optional chaining also changes the result for falsy non-null values) and `noArguments` (deliberate forwarding in the native-masked hooks). Suppress a finding only with a `biome-ignore` comment that says why. Formatting-only commits go in `.git-blame-ignore-revs`.
 
 ## Types
 
