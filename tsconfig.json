@@ -1,16 +1,9 @@
 {
-    // Type-checks vaft/vaft.user.js as JavaScript (JSDoc + types/vaft.d.ts). Emits nothing;
-    // the userscript ships exactly as written.
+    // Page bundle (src/page) plus the code it shares with the worker, against the DOM lib.
+    // The worker is checked separately against the webworker lib: src/worker/tsconfig.json.
+    "extends": "./tsconfig.base.json",
     "compilerOptions": {
-        "target": "es2022",
-        "lib": ["es2022", "dom", "dom.iterable"],
-        "types": [],
-        "allowJs": true,
-        "checkJs": true,
-        "noEmit": true,
-        "strict": true,
-        "noImplicitThis": true,
-        "skipLibCheck": true
+        "lib": ["es2022", "dom", "dom.iterable"]
     },
-    "files": ["vaft/vaft.user.js", "types/vaft.d.ts"]
+    "include": ["src/page", "src/shared"]
 }

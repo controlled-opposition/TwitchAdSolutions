@@ -1,0 +1,19 @@
+{
+    // Shared compiler options. tsconfig.json (page) and src/worker/tsconfig.json (worker)
+    // extend this; each picks the lib for its environment. Nothing is emitted: esbuild builds
+    // (scripts/build.js), tsc only checks.
+    "compilerOptions": {
+        "target": "es2022",
+        "module": "preserve",
+        "moduleResolution": "bundler",
+        "types": [],
+        "noEmit": true,
+        "strict": true,
+        "noImplicitThis": true,
+        "allowImportingTsExtensions": true,
+        "verbatimModuleSyntax": true,
+        "erasableSyntaxOnly": true,
+        "isolatedModules": true,
+        "skipLibCheck": true
+    }
+}

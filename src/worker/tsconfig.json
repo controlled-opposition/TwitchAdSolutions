@@ -1,0 +1,8 @@
+{
+    // Worker bundle, against the webworker lib: no window or document here.
+    "extends": "../../tsconfig.base.json",
+    "compilerOptions": {
+        "lib": ["es2022", "webworker", "webworker.iterable"]
+    },
+    "include": [".", "../shared"]
+}

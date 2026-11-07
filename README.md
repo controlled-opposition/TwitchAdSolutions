@@ -99,6 +99,17 @@ localStorage.removeItem('twitchAdSolutions_backupSwapFirst');
 
 See [DEBUG.md](DEBUG.md) for how to read the `[AD DEBUG]` console output.
 
+## Development
+
+The script is written in TypeScript under `src/` and built with esbuild into `vaft/vaft.user.js`. The built file is committed, since the install and update URLs serve it from the repo. Don't edit it by hand.
+
+```sh
+nix develop               # or direnv; provides node, esbuild, tsc, biome
+node scripts/build.js     # rebuild vaft/vaft.user.js
+node tests/test.js        # unit + end-to-end tests
+nix flake check           # everything CI runs
+```
+
 ## License
 
 MIT. See [LICENSE](LICENSE). vaft credits: https://github.com/cleanlock/VideoAdBlockForTwitch#credits

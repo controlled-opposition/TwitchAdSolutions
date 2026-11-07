@@ -27,6 +27,8 @@
           settings = {
             tree-root-file = "flake.nix";
             on-unmatched = "debug";
+            # Build output (scripts/build.js), not hand-formatted.
+            excludes = [ "vaft/vaft.user.js" ];
             formatter = {
               nixfmt = {
                 command = "nixfmt";
@@ -66,30 +68,35 @@
     {
       formatter = forAllSystems mkTreefmt;
 
-      # `nix flake check` fails if anything is unformatted.
-      checks = forAllSystems (pkgs: {
-        formatting = (mkTreefmt pkgs).check self;
-      });
-
-      packages = forAllSystems (pkgs: {
-        # acorn isn't in nixpkgs. It has no dependencies, so the npm tarball is enough.
-        acorn = pkgs.stdenvNoCC.mkDerivation rec {
-          pname = "acorn";
-          version = "8.19.0";
-          src = pkgs.fetchurl {
-            url = "https://registry.npmjs.org/acorn/-/acorn-${version}.tgz";
-            hash = "sha512-oJlA3XiRm7Cyk6qFD2Jn8ak9B7jSy0qy00ADO3+8dpT0LSjFihQYv4C02LFCSYJV3Q37xYwwRy5m+IpIiUzqWw==";
-          };
-          nativeBuildInputs = [ pkgs.makeWrapper ];
-          installPhase = ''
-            mkdir -p $out/lib/node_modules/acorn $out/bin
-            cp -r . $out/lib/node_modules/acorn
-            makeWrapper ${pkgs.nodejs}/bin/node $out/bin/acorn \
-              --add-flags $out/lib/node_modules/acorn/bin/acorn
-          '';
-          meta.mainProgram = "acorn";
-        };
-      });
+      # `nix flake check` runs the whole suite. Each check gets a writable copy of the source.
+      checks = forAllSystems (
+        pkgs:
+        let
+          runCheck =
+            name: tools: script:
+            pkgs.runCommand "vaft-${name}" { nativeBuildInputs = tools; } ''
+              cp -r ${self} source
+              chmod -R u+w source
+              cd source
+              ${script}
+              touch $out
+            '';
+        in
+        {
+          formatting = (mkTreefmt pkgs).check self;
+          lint = runCheck "lint" [ pkgs.biome ] "biome ci --vcs-enabled=false .";
+          typecheck = runCheck "typecheck" [ pkgs.typescript ] "tsc -p . && tsc -p src/worker";
+          # vaft/vaft.user.js is committed; it must be exactly what the sources build to.
+          build = runCheck "build" [
+            pkgs.nodejs
+            pkgs.esbuild
+          ] "node scripts/build.js --check";
+          tests = runCheck "tests" [
+            pkgs.nodejs
+            pkgs.esbuild
+          ] "node tests/test.js";
+        }
+      );
 
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
@@ -97,13 +104,11 @@
             pkgs.nodejs
             pkgs.typescript
             pkgs.biome
-            self.packages.${pkgs.stdenv.hostPlatform.system}.acorn
+            pkgs.esbuild
             (mkTreefmt pkgs)
           ];
-          # tests/load-vaft.js does require('acorn').
-          NODE_PATH = "${self.packages.${pkgs.stdenv.hostPlatform.system}.acorn}/lib/node_modules";
           shellHook = ''
-            echo "vaft dev shell — format: nix fmt (or treefmt) · lint: biome check --write . · types: tsc -p . · tests: node tests/test.js · syntax: acorn --ecma2022 vaft/vaft.user.js >/dev/null"
+            echo "vaft dev shell — build: node scripts/build.js · tests: node tests/test.js · types: tsc -p . && tsc -p src/worker · lint: biome check --write . · format: nix fmt · everything: nix flake check"
           '';
         };
       });

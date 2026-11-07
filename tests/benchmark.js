@@ -4,7 +4,8 @@
 // Measures CPU time and memory for the hot-path functions that run
 // on every m3u8 playlist fetch (~every 2s per stream).
 
-const { performance } = require('node:perf_hooks');
+import { performance } from 'node:perf_hooks';
+import { loadModules } from './load.js';
 
 // ============================================================
 // Test payloads — realistic m3u8 content
@@ -152,17 +153,21 @@ const pixeltris = (() => {
 })();
 
 // ============================================================
-// Current vaft functions, loaded from vaft/vaft.user.js
+// Current vaft functions, loaded from src/
 // ============================================================
 
-const { loadVaft } = require('./load-vaft');
-const vaftContext = loadVaft(['hasAdTags', 'stripAdSegments', 'parseAttributes', 'createStreamInfo']);
+const vaftContext = loadModules([
+    'src/worker/ads.ts',
+    'src/worker/playlist.ts',
+    'src/worker/stream-info.ts',
+    'src/worker/state.ts',
+]);
 const vaft = {
     hasAdTags: vaftContext.hasAdTags,
     stripAdSegments: vaftContext.stripAdSegments,
     parseAttributes: vaftContext.parseAttributes,
     reset() {
-        vaftContext.AdSegmentCache.clear();
+        vaftContext.state.AdSegmentCache.clear();
     },
 };
 
@@ -175,14 +180,14 @@ function bench(name, fn, iterations = 50000) {
     for (let i = 0; i < 1000; i++) fn();
 
     // Force GC if available
-    if (global.gc) global.gc();
+    if (globalThis.gc) globalThis.gc();
     const memBefore = process.memoryUsage();
 
     const start = performance.now();
     for (let i = 0; i < iterations; i++) fn();
     const elapsed = performance.now() - start;
 
-    if (global.gc) global.gc();
+    if (globalThis.gc) globalThis.gc();
     const memAfter = process.memoryUsage();
 
     const opsPerSec = ((iterations / elapsed) * 1000).toFixed(0);

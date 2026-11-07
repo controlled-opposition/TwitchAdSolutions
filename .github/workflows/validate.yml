@@ -14,29 +14,6 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  validate:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      # Keep these versions in step with the Nix dev shell (flake.nix / flake.lock).
-      - name: Install acorn, TypeScript and Biome
-        run: |
-          npm install -g acorn@8.19.0 typescript@7.0.2 @biomejs/biome@2.6.4
-          echo "NODE_PATH=$(npm root -g)" >> "$GITHUB_ENV"
-
-      - name: Lint and format check (Biome)
-        run: biome ci .
-
-      - name: Validate userscript syntax
-        run: acorn --ecma2022 vaft/vaft.user.js > /dev/null
-
-      - name: Type-check userscript
-        run: tsc -p .
-
-      - name: Run unit tests
-        run: node tests/test.js
-
   nix:
     runs-on: ubuntu-latest
     steps:
@@ -44,8 +21,9 @@ jobs:
 
       - uses: cachix/install-nix-action@v31
 
-      # Builds the checks for this runner's system: currently the treefmt formatting check
-      # (nixfmt, Biome, yamlfmt) over the whole tree.
+      # The whole suite, with the tool versions pinned in flake.lock: formatting (treefmt), lint
+      # (Biome), type check (both bundles), build up to date (vaft/vaft.user.js matches src/),
+      # and tests.
       - name: Flake checks
         run: nix flake check --print-build-logs
 

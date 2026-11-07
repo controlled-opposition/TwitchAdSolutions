@@ -1,5 +1,13 @@
 // Unit tests for TwitchAdSolutions
 // Run: node tests/test.js
+//
+// Unit tests load src/ modules through tests/load.js (fresh module state per load). The
+// end-to-end tests at the bottom run the built vaft/vaft.user.js through tests/harness.js.
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { injectWorker, startWorker } from './harness.js';
+import { loadModules, ROOT } from './load.js';
+import { runScenario, SCENARIOS } from './scenarios.js';
 
 let passed = 0;
 let failed = 0;
@@ -36,22 +44,13 @@ function assertDeepEq(actual, expected, message) {
 }
 
 // ============================================================
-// Functions under test, loaded from vaft/vaft.user.js
+// Worker functions under test
 // ============================================================
-const { loadVaft } = require('./load-vaft');
-
-const vaft = loadVaft([
-    'hasAdTags',
-    'getMatchedAdSignifiers',
-    'parseAttributes',
-    'getServerTimeFromM3u8',
-    'replaceServerTimeInM3u8',
-    'getStreamUrlForResolution',
-    'stripAdSegments',
-    'createStreamInfo',
-    'workerStringConflicts',
-    'workerStringReinsert',
-    'isValidWorker',
+const vaft = loadModules([
+    'src/worker/ads.ts',
+    'src/worker/playlist.ts',
+    'src/worker/stream-info.ts',
+    'src/worker/state.ts',
 ]);
 const {
     hasAdTags,
@@ -61,10 +60,10 @@ const {
     replaceServerTimeInM3u8,
     getStreamUrlForResolution,
     stripAdSegments,
-    isValidWorker,
 } = vaft;
+const { isValidWorker } = loadModules(['src/page/worker-hook.ts']);
 // Same Map object the loaded code reads and writes; clear() it between cases.
-const AdSegmentCache = vaft.AdSegmentCache;
+const AdSegmentCache = vaft.state.AdSegmentCache;
 
 // A real StreamInfo (full field shape from createStreamInfo) with per-test overrides.
 function makeStreamInfo(overrides = {}) {
@@ -139,7 +138,7 @@ assertEq(attrs2['FRAME-RATE'], 60, 'parses 60fps');
 // Test: getServerTimeFromM3u8
 // ============================================================
 console.log('--- getServerTimeFromM3u8 ---');
-vaft.V2API = false;
+vaft.state.V2API = false;
 assertEq(
     getServerTimeFromM3u8('#EXT-X-TWITCH-ELAPSED-SECS:10.5,SERVER-TIME="1234567890.123"'),
     '1234567890.123',
@@ -147,20 +146,20 @@ assertEq(
 );
 assertEq(getServerTimeFromM3u8('no server time here'), null, 'returns null when no server time');
 
-vaft.V2API = true;
+vaft.state.V2API = true;
 assertEq(
     getServerTimeFromM3u8('#EXT-X-SESSION-DATA:DATA-ID="SERVER-TIME",VALUE="9876543210.456"'),
     '9876543210.456',
     'extracts v2 server time',
 );
 assertEq(getServerTimeFromM3u8('no server time here'), null, 'returns null for v2 when no match');
-vaft.V2API = false;
+vaft.state.V2API = false;
 
 // ============================================================
 // Test: replaceServerTimeInM3u8
 // ============================================================
 console.log('--- replaceServerTimeInM3u8 ---');
-vaft.V2API = false;
+vaft.state.V2API = false;
 const m3u8WithTime = '#EXT-X-TWITCH-ELAPSED-SECS:10.5,SERVER-TIME="1234567890.123"';
 assert(
     replaceServerTimeInM3u8(m3u8WithTime, '9999999999.000').includes('SERVER-TIME="9999999999.000"'),
@@ -168,10 +167,10 @@ assert(
 );
 assertEq(replaceServerTimeInM3u8(m3u8WithTime, null), m3u8WithTime, 'returns original when newServerTime is null');
 
-vaft.V2API = true;
+vaft.state.V2API = true;
 const m3u8V2 = '#EXT-X-SESSION-DATA:DATA-ID="SERVER-TIME",VALUE="1234567890.123"';
 assert(replaceServerTimeInM3u8(m3u8V2, '9999999999.000').includes('VALUE="9999999999.000"'), 'replaces v2 server time');
-vaft.V2API = false;
+vaft.state.V2API = false;
 
 // ============================================================
 // Test: getStreamUrlForResolution
@@ -472,16 +471,16 @@ assertEq(
 // Test: getServerTimeFromM3u8 — edge cases
 // ============================================================
 console.log('--- getServerTimeFromM3u8 (edge cases) ---');
-vaft.V2API = false;
+vaft.state.V2API = false;
 assertEq(getServerTimeFromM3u8('SERVER-TIME=""'), null, 'returns null for empty server time');
 assertEq(getServerTimeFromM3u8('SERVER-TIME="abc"'), null, 'returns null for non-numeric v1 time');
-vaft.V2API = true;
+vaft.state.V2API = true;
 assertEq(
     getServerTimeFromM3u8('#EXT-X-SESSION-DATA:DATA-ID="OTHER",VALUE="123"'),
     null,
     'returns null for wrong DATA-ID',
 );
-vaft.V2API = false;
+vaft.state.V2API = false;
 
 // ============================================================
 // Test: parseAttributes — edge cases
@@ -489,34 +488,6 @@ vaft.V2API = false;
 console.log('--- parseAttributes (edge cases) ---');
 const attrsEmpty = parseAttributes('');
 assert(typeof attrsEmpty === 'object', 'returns object for empty string');
-
-// ============================================================
-// Test: worker blob functions load on their own
-// ============================================================
-// hookWindowWorker() pastes these functions into the worker with .toString(). Read the list
-// from the template itself so newly serialized functions are covered automatically.
-console.log('--- worker blob functions ---');
-{
-    const fs = require('node:fs');
-    const { SCRIPT_PATH } = require('./load-vaft');
-    const serialized = [...fs.readFileSync(SCRIPT_PATH, 'utf8').matchAll(/\$\{(\w+)\.toString\(\)\}/g)].map(
-        (m) => m[1],
-    );
-    assert(
-        serialized.length >= 10,
-        'found the serialized function list in the worker template (' + serialized.length + ')',
-    );
-    let worker = null;
-    try {
-        worker = loadVaft(serialized);
-    } catch (e) {
-        console.error(e);
-    }
-    assert(worker !== null, 'all serialized functions load together in a fresh context');
-    for (const name of serialized) {
-        assert(worker && typeof worker[name] === 'function', name + ' is defined after loading');
-    }
-}
 
 // ============================================================
 // Test: worker master-playlist hook (hookWorkerFetch)
@@ -533,7 +504,7 @@ process.on('unhandledRejection', (e) => {
 // Resolves to 'resolved' or 'hung' (no answer within 500ms).
 function workerMasterFetch(worker, url) {
     return Promise.race([
-        worker.fetch(url).then(
+        worker.context.fetch(url).then(
             () => 'resolved',
             () => 'rejected',
         ),
@@ -541,25 +512,9 @@ function workerMasterFetch(worker, url) {
     ]);
 }
 function makeWorkerContext(network) {
-    const worker = loadVaft(
-        [
-            'hookWorkerFetch',
-            'getServerTimeFromM3u8',
-            'replaceServerTimeInM3u8',
-            'parseAttributes',
-            'videoCodecFamily',
-            'createStreamInfo',
-            'processM3U8',
-            'hasAdTags',
-            'getMatchedAdSignifiers',
-            'stripAdSegments',
-            'notifyAdComplete',
-            'getStreamUrlForResolution',
-            'gqlRequest',
-            'getAccessToken',
-        ],
-        { globals: { Response, Blob, URL, atob, Uint8Array, setTimeout, clearTimeout, fetch: network } },
-    );
+    const worker = loadModules(['src/worker/fetch-hook.ts', 'src/worker/state.ts'], {
+        globals: { Response, Blob, URL, atob, setTimeout, clearTimeout, fetch: network },
+    });
     worker.hookWorkerFetch();
     return worker;
 }
@@ -589,7 +544,7 @@ asyncTests.push(async () => {
         requested.includes('https://video-edge.example.net/v1/segment/chunked/abc'),
         'v2 cache is probed through its raw CDN variant URL',
     );
-    assert(worker.StreamInfos.testchan !== undefined, 'stream session exists after the repeat request');
+    assert(worker.state.StreamInfos.testchan !== undefined, 'stream session exists after the repeat request');
 });
 
 asyncTests.push(async () => {
@@ -598,13 +553,13 @@ asyncTests.push(async () => {
         return new Response(v2Encodings, { status: 200 });
     });
     await workerMasterFetch(worker, masterUrl);
-    const first = worker.StreamInfos.testchan;
+    const first = worker.state.StreamInfos.testchan;
     assertEq(
         await workerMasterFetch(worker, masterUrl),
         'resolved',
         'repeat request still resolves when the cache probe rejects',
     );
-    assert(worker.StreamInfos.testchan !== first, 'a rejected probe rebuilds the stream session');
+    assert(worker.state.StreamInfos.testchan !== first, 'a rejected probe rebuilds the stream session');
 });
 
 // ============================================================
@@ -613,14 +568,13 @@ asyncTests.push(async () => {
 asyncTests.push(async () => {
     console.log('--- gqlRequest headers ---');
     const posted = [];
-    const worker = loadVaft(['gqlRequest'], {
+    const worker = loadModules(['src/worker/gql.ts', 'src/worker/state.ts'], {
         globals: { setTimeout, clearTimeout, postMessage: (m) => posted.push(m) },
     });
-    worker.pendingFetchRequests = new Map();
-    worker.GQLDeviceID = 'device123';
-    worker.AuthorizationHeader = undefined;
+    worker.state.GQLDeviceID = 'device123';
+    worker.state.AuthorizationHeader = undefined;
     worker.gqlRequest({ operationName: 'Test' }).catch(() => {});
-    worker.AuthorizationHeader = 'OAuth abc';
+    worker.state.AuthorizationHeader = 'OAuth abc';
     worker.gqlRequest({ operationName: 'Test' }).catch(() => {});
     const [loggedOut, loggedIn] = posted.map((m) => m.value.options.headers);
     assert(!('Authorization' in loggedOut), 'no Authorization header when logged out (was the literal "undefined")');
@@ -635,40 +589,101 @@ asyncTests.push(async () => {
 asyncTests.push(async () => {
     console.log('--- hookFetch ---');
     const calls = [];
-    const page = loadVaft(
-        [
-            'hookFetch',
-            'maskAsNative',
-            'postTwitchWorkerMessage',
-            'twitchWorkers',
-            'countCsaiRequest',
-            'csaiRequestCounts',
-            'playerBufferState',
-        ],
-        {
-            globals: {
-                fetch: async (...args) => {
-                    calls.push(args);
-                    return 'ok';
-                },
+    const page = loadModules(['src/page/fetch-hook.ts', 'src/page/state.ts'], {
+        globals: {
+            fetch: async (...args) => {
+                calls.push(args);
+                return 'ok';
             },
         },
-    );
+    });
     page.hookFetch();
     let threw = null;
     try {
-        await page.fetch('https://gql.twitch.tv/gql');
+        await page.context.fetch('https://gql.twitch.tv/gql');
     } catch (e) {
         threw = e;
     }
     assertEq(threw, null, 'GQL fetch without an init object does not throw in the hook');
     assertEq(calls.length, 1, 'request is passed through to the real fetch');
-    await page.fetch('https://gql.twitch.tv/gql', {
+    await page.context.fetch('https://gql.twitch.tv/gql', {
         headers: { 'Client-Version': 'v1', 'X-Device-Id': 'dev1' },
         body: '{}',
     });
-    assertEq(page.ClientVersion, 'v1', 'captures Client-Version from GQL request headers');
-    assertEq(page.GQLDeviceID, 'dev1', 'captures X-Device-Id from GQL request headers');
+    assertEq(page.state.ClientVersion, 'v1', 'captures Client-Version from GQL request headers');
+    assertEq(page.state.GQLDeviceID, 'dev1', 'captures X-Device-Id from GQL request headers');
+});
+
+// ============================================================
+// End to end: the built userscript (vaft/vaft.user.js)
+// ============================================================
+const BUILT = join(ROOT, 'vaft', 'vaft.user.js');
+
+asyncTests.push(async () => {
+    console.log('--- built userscript: injected worker ---');
+    if (!existsSync(BUILT)) {
+        assert(false, 'vaft/vaft.user.js exists (run node scripts/build.js)');
+        return;
+    }
+    const blob = injectWorker(BUILT);
+    assert(blob.startsWith('(function runWorker(__vaftInit)'), 'worker blob is the runWorker() bundle');
+    assert(
+        blob.includes('hookWorkerFetch'),
+        "blob carries the 'hookWorkerFetch' marker the already-hooked check looks for",
+    );
+    const network = async () => ({ body: '#EXTM3U' });
+    const worker = startWorker(blob, { network, twitchWorkerJs: 'var twitchWorkerLoaded = true;' });
+    assertEq(worker.context.twitchWorkerLoaded, true, "Twitch's worker code runs in the worker's global scope");
+    assert(worker.context.fetch.toString().includes('AdSegmentCache'), 'worker fetch is hooked');
+
+    // Settings from the page reach the worker.
+    const custom = startWorker(injectWorker(BUILT, { localStorage: { twitchAdSolutions_playerType: 'embed' } }), {
+        network,
+    });
+    const r = await custom.fetch('https://usher.ttvnw.net/api/channel/hls/x.m3u8?parent_domains=a');
+    assertEq(r.status, 200, 'master playlist request answered');
+    assert(
+        !custom.requested.some((u) => u.includes('parent_domains')),
+        'ForceAccessTokenPlayerType from localStorage reached the worker (parent_domains stripped)',
+    );
+});
+
+asyncTests.push(async () => {
+    console.log('--- built userscript: ad-break scenarios ---');
+    if (!existsSync(BUILT)) return;
+    const site = (await runScenario(BUILT, SCENARIOS['ad break, clean backup (site)'])).transcript;
+    const adPoll = site.find((t) => t.label === 'phase 1 poll 0');
+    assert(adPoll.body.includes('backup-site/'), 'ad break: playlist swapped to the clean site backup');
+    assert(!adPoll.body.includes('edge.example/ad/'), 'ad break: no ad segments reach the player');
+    assert(
+        adPoll.messages.some((m) => m.key === 'UpdateAdBlockBanner' && m.activeBackupPlayerType === 'site'),
+        'ad break: banner reports the site backup',
+    );
+    const end = site.filter((t) => t.label.startsWith('phase 2')).flatMap((t) => t.messages);
+    assert(
+        end.some((m) => m.key === 'ReloadPlayer') && end.some((m) => m.key === 'UpdateAdBlockBanner' && !m.hasAds),
+        'ad break end: player reload and banner cleared',
+    );
+
+    const stripRun = await runScenario(BUILT, SCENARIOS['ad break, every backup ad-laden (strip + recovery)']);
+    const stripped = stripRun.transcript.filter((t) => t.label.startsWith('phase 1'));
+    // The strip path leaves ad segment lines in the playlist and answers them with a blank MP4.
+    const adUrls = [...new Set(stripped.flatMap((t) => t.body.match(/^https:\/\/edge\.example\/ad\/\S+$/gm) || []))];
+    assert(adUrls.length > 0, 'all backups ad-laden: playlists still list ad segments (to be blanked)');
+    const answers = await Promise.all(adUrls.map((u) => stripRun.worker.fetch(u)));
+    assert(
+        answers.every((a) => a.body !== 'segment'),
+        'all backups ad-laden: every ad segment is answered with the blank MP4, not the ad',
+    );
+    assertEq(
+        (await stripRun.worker.fetch('https://edge.example/live/seg-1.ts')).body,
+        'segment',
+        'live segments still come from the network',
+    );
+    assert(
+        stripped.flatMap((t) => t.messages).some((m) => m.key === 'ReloadPlayer' && m.kind === 'early'),
+        'all backups ad-laden: early reload requested',
+    );
 });
 
 // ============================================================

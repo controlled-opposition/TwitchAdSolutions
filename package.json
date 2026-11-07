@@ -1,0 +1,11 @@
+{
+    "name": "twitch-ad-solutions-vaft",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "build": "node scripts/build.js",
+        "check": "biome ci . && tsc -p . && tsc -p src/worker && node scripts/build.js --check && node tests/test.js",
+        "test": "node tests/test.js",
+        "bench": "node tests/benchmark.js"
+    }
+}

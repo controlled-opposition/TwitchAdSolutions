@@ -5,23 +5,33 @@ Hard fork of ryanbr/TwitchAdSolutions (forked at vaft 68.5.7), trimmed to the si
 ## Scope
 
 - The only shipped artifact is `vaft/vaft.user.js`. Don't add uBlock Origin scriptlets, testing builds, other script variants, or extensions.
-- `tests/load-vaft.js` extracts functions from `vaft.user.js` (acorn) and evaluates them in a vm context after `declareOptions(globalThis)`; tests and the benchmark use it, so they always run the shipped code. Shared globals are context properties (`vaft.V2API = true`, `vaft.AdSegmentCache.clear()`).
+- `vaft/vaft.user.js` is **generated** from `src/` by `node scripts/build.js` (esbuild) and committed, because the install/update URL serves it straight from the repo. Never edit it by hand; change `src/` and rebuild. `nix flake check` (and CI) fails if it is stale.
 
-## Worker Blob Serialization (CRITICAL)
+## Layout
 
-Functions serialized via `.toString()` into the Web Worker blob CANNOT reference outer-scope variables. This includes: `processM3U8`, `stripAdSegments`, `hookWorkerFetch`, `getAccessToken`, `gqlRequest`, `hasAdTags`, `getMatchedAdSignifiers`, `notifyAdComplete`, `getStreamUrlForResolution`, `parseAttributes`, `getServerTimeFromM3u8`, `replaceServerTimeInM3u8`, `pruneStreamInfos`, `createStreamInfo`, `getWasmWorkerJs`, `videoCodecFamily`.
+- `src/meta.js`: the userscript header (`@version` etc.), prepended by the build.
+- `src/page/`: runs on the page. `index.ts` is the entry (frame/clip-page guards, duplicate-copy check, startup). `state.ts` holds the page's settings (`state`), the shared mutable flags (`runtime`) and `playerBufferState`.
+- `src/worker/`: runs inside Twitch's video worker. `index.ts` is the entry. `state.ts` holds the worker's settings and stream state (`state`: `StreamInfos`, `AdSegmentCache`, `V2API`, ...).
+- `src/shared/`: used by both bundles: types (`StreamInfo`, the page⇄worker messages, `SharedConfig`), `defaultSharedConfig()`, `getWasmWorkerJs()`. It must not use DOM-only or worker-only APIs: it is type-checked against both libs.
+- `scripts/build.js`: the build. `tests/`: unit tests, the end-to-end harness and the benchmark.
 
-- Declare variables in `declareOptions()` (also serialized) or in the inline blob template literal
-- To pass window-scope values to the worker, inject after `declareOptions(self)`: e.g. `ReloadPlayerAfterAd = ${ReloadPlayerAfterAd};`
-- Regex hoisting or referencing outer-scope variables from these functions causes `ReferenceError`
+## Worker Injection
+
+The worker is a separate esbuild bundle. The build splices it into the userscript as the body of `runWorker()` (`src/page/worker-bundle.ts`), and `hookWindowWorker()` starts each Twitch worker from `(${runWorker.toString()})(${JSON.stringify(init)})`. `init` is a `WorkerInit`: Twitch's worker blob URL plus `SharedConfig`, the page settings the worker needs (localStorage options and captured GQL headers). Later header changes travel as `Update*` messages.
+
+- Worker code can import anything under `src/worker/` and `src/shared/`; the bundle is self-contained, so there is no outer-scope rule any more. It cannot import from `src/page/`, and `src/worker/tsconfig.json` (webworker lib) rejects `window`/`document`.
+- To pass a new page setting to the worker, add it to `SharedConfig` (`src/shared/types.ts`) and `defaultSharedConfig()`. Both `state` objects spread the defaults, so the page reads it from localStorage and the worker receives it in `init.config`.
+- The worker entry runs Twitch's own worker script with an indirect eval (`(0, eval)(...)`) so it lands in the worker's global scope, as it would as its own worker script.
+- The output is sloppy-mode on purpose (`--tsconfig-raw={}` in the build): the script always ran sloppy, where assigning to a property another extension made read-only fails silently instead of throwing.
+- `alreadyHooked` detection relies on the blob text containing `hookWorkerFetch`; a test checks the built blob still does.
 
 ## Versions
 
-Bump `@version` (userscript header) and `ourTwitchAdSolutionsVersion` together for functional changes. `ourTwitchAdSolutionsVersion` also drives duplicate-script detection (a running copy with an equal or higher value makes this one skip), so it must only ever increase.
+Bump `@version` (`src/meta.js`) and `ourTwitchAdSolutionsVersion` (`src/page/index.ts`) together for functional changes, then rebuild. `ourTwitchAdSolutionsVersion` also drives duplicate-script detection (a running copy with an equal or higher value makes this one skip), so it must only ever increase.
 
 ## localStorage Config
 
-All read at init, injected into worker blob:
+All read at init (`loadLocalStorageConfig()` in `src/page/storage.ts`); the ones the worker uses reach it through `SharedConfig`:
 - `twitchAdSolutions_reloadPlayerAfterAd` — `true`/`false`, default `true`
 - `twitchAdSolutions_playerType` — string, default `popout`
 - `twitchAdSolutions_pinBackupPlayerType` — `true`/`false`, default `true`
@@ -56,36 +66,42 @@ All read at init, injected into worker blob:
 - **Latency-aware reload health check** — measures `seekable.end - currentTime` before skipping post-ad reload. If >7s behind live or seekable unavailable/garbage, proceeds with reload. Guards against 2^30 sentinel values via `Number.isFinite` + 3600s cap.
 - **User pause intent** — tracks video pause/play events to distinguish user vs script pauses. `weJustPaused` only resets when player wasn't paused (guards against clearing intent during stall recovery).
 - **Stale player ref** — `playerForMonitoringBuffering = null` on reload to force re-acquisition.
-- **StreamInfo factory** — `createStreamInfo()` declares all fields up-front (51 fields). Serialized into worker blob. It is typed `@returns {StreamInfo}`, so a field missing from it or from the `StreamInfo` interface is a type error.
+- **StreamInfo factory** — `createStreamInfo()` (`src/worker/stream-info.ts`) declares all fields up-front (51 fields).
 
 ## Debug Logging
 
-All logs use `[AD DEBUG]` prefix. Logs in `.toString()` functions must use `console.log` directly. Some logs are deduped (once per ad break or once per page load) to prevent console spam.
+All logs use `[AD DEBUG]` prefix. Some logs are deduped (once per ad break or once per page load) to prevent console spam.
 
 ## Validation
 
 In the Nix dev shell (`nix develop` / direnv):
-- `nix fmt` (or `treefmt`) — format everything: nixfmt for `*.nix`, Biome for JS/TS/JSON, yamlfmt for YAML. Markdown is not auto-formatted. `nix flake check` fails on unformatted files.
-- `biome check --write .` — lint + format JS/TS/JSON (CI runs `biome ci .`, which fails on unformatted code or lint errors)
-- `acorn --ecma2022 vaft/vaft.user.js > /dev/null` — syntax
-- `tsc -p .` — type check (must be 0 errors)
-- `node tests/test.js` — unit tests (includes a check that every `${fn.toString()}` worker function loads standalone)
-- `node tests/benchmark.js` — optional perf comparison against the pixeltris baseline
+- `node scripts/build.js`: rebuild `vaft/vaft.user.js` after any change under `src/` (`--check` only verifies).
+- `node tests/test.js`: unit tests plus end-to-end tests against the built script.
+- `tsc -p . && tsc -p src/worker`: type check the page and worker bundles (0 errors).
+- `biome check --write .`: lint + format `src/`, `scripts/`, `tests/` and JSON.
+- `nix fmt`: format everything (nixfmt, Biome, yamlfmt). Markdown is not auto-formatted.
+- `nix flake check`: all of the above as checks (formatting, lint, typecheck, build up to date, tests). This is what CI runs.
+- `node tests/benchmark.js`: optional perf comparison against the pixeltris baseline.
 
-GitHub Actions (`.github/workflows/validate.yml`) runs all but the benchmark on push/PR, plus a `nix` job: `nix flake check` (formatting check) and an all-systems evaluation. Markdown-only changes skip CI.
+Use the dev shell's esbuild: the up-to-date check compares bytes, so a different esbuild version can produce a spurious diff.
+
+## Tests
+
+- `tests/load.js`: `loadModules(['src/worker/ads.ts', ...], { globals })` bundles the listed modules and evaluates them in a fresh vm context, so each call gets its own module state. Exports come back as properties (`vaft.stripAdSegments`, `vaft.state.V2API = true`); `vaft.context` is the global (`self`/`window`).
+- `tests/harness.js`: loads a built userscript into a mock page, captures the worker blob it injects, and runs it in a mock worker with a scripted network and GQL.
+- `tests/scenarios.js`: scripted ad-break scenarios (fake clock) that produce a transcript of returned playlists and worker messages. Running the same scenarios against two builds compares their behaviour; that is how this TypeScript conversion was checked against v68.5.8.
 
 ## Lint / Format (Biome)
 
-`biome.json`: 4-space indent, 120 columns, single quotes, semicolons, trailing commas; recommended lint preset minus `useTemplate`, `useArrowFunction`, `useOptionalChain`, `useLiteralKeys` (style-only churn; optional chaining also changes the result for falsy non-null values) and `noArguments` (deliberate forwarding in the native-masked hooks). Suppress a finding only with a `biome-ignore` comment that says why. Formatting-only commits go in `.git-blame-ignore-revs`.
+`biome.json`: 4-space indent, 120 columns, single quotes, semicolons, trailing commas; recommended lint preset minus `useTemplate`, `useArrowFunction`, `useOptionalChain`, `useLiteralKeys` (style-only churn; optional chaining also changes the result for falsy non-null values) and `noArguments` (deliberate forwarding in the native-masked hooks). Suppress a finding only with a `biome-ignore` comment that says why. Formatting-only commits go in `.git-blame-ignore-revs`. The generated `vaft/vaft.user.js` is excluded.
 
 ## Types
 
-`vaft.user.js` stays plain JavaScript and ships as written; TypeScript (7.x, `tsconfig.json`) only checks it via `checkJs`.
-- `types/vaft.d.ts` holds the declarations: every `declareOptions()` global, `StreamInfo`/`ResolutionInfo`, the worker⇄page message unions (`WorkerToPageMessage`, `PageToWorkerValues`), and `Window` additions. Adding a `scope.X` in `declareOptions()` or a field in `createStreamInfo()` means adding it there too.
-- Annotate functions with JSDoc (`@param`, `@returns`). Worker `postMessage(...)` calls wrap the literal in `/** @satisfies {WorkerToPageMessage} */ (...)` because the global `postMessage` signature accepts anything.
-- Per-function state on worker-serialized functions lives in function properties (`notifyAdComplete.loggedNoMatch`), not outer variables (which don't exist in the worker). Declare each one with a falsy default right after the function so the checker knows it.
-- `strict` is on. Twitch internals reached through React (`TwitchMediaPlayer`, `TwitchPlayerState`, `ReactFiber`) are typed with only the members vaft uses, all optional where Twitch may drop them; `findReactNode` returns `any` deliberately.
-- Behaviour-neutral casts used where the checker can't follow the code: `/** @type {Error} */ (err).message` in catch blocks, `/** @type {any} */ (arguments)` when forwarding to the real `fetch`/`setItem`/`open`. Don't "fix" these by changing runtime behaviour.
+TypeScript 7 (`tsconfig.base.json`, extended by `tsconfig.json` for the page + shared code with the DOM lib, and `src/worker/tsconfig.json` for the worker with the webworker lib). `strict` is on; tsc only checks, esbuild builds.
+- Imports use explicit `.ts` extensions and `import type` for types (`verbatimModuleSyntax`, `erasableSyntaxOnly`).
+- `StreamInfo` is built by `createStreamInfo()` with every field up front (51 fields); a field missing from it or from the interface is a type error.
+- Twitch internals reached through React (`TwitchMediaPlayer`, `TwitchPlayerState`, `ReactFiber` in `src/page/twitch.ts`) are typed with only the members vaft uses, all optional where Twitch may drop them; component instances are deliberately `any` (`ReactInstance`).
+- Behaviour-neutral casts where the checker can't follow the code: `(err as Error).message` in catch blocks, `arguments as any` when forwarding to the real `fetch`/`setItem`/`open`. Don't "fix" these by changing runtime behaviour.
 
 ## Backup Player Types
 
