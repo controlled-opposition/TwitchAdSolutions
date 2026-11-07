@@ -1,7 +1,14 @@
 import { installHook } from '../shared/hook.ts';
 import type { ResolutionInfo, StreamInfo } from '../shared/types.ts';
 import { processM3U8 } from './m3u8.ts';
-import { getServerTimeFromM3u8, parseAttributes, replaceServerTimeInM3u8, videoCodecFamily } from './playlist.ts';
+import {
+    getServerTimeFromM3u8,
+    isEnhancedCodec,
+    parseAttributes,
+    replaceServerTimeInM3u8,
+    resolutionArea,
+    videoCodecFamily,
+} from './playlist.ts';
 import { createStreamInfo } from './stream-info.ts';
 import { state } from './state.ts';
 
@@ -145,10 +152,9 @@ export function hookWorkerFetch(): boolean {
                                 if (
                                     state.AlwaysReloadPlayerOnAd ||
                                     (decodableResolutionList.length > 0 &&
-                                        streamInfo.ResolutionList.some((element: ResolutionInfo) => {
-                                            const f = videoCodecFamily(element.Codecs);
-                                            return f === 'hevc' || f === 'av1';
-                                        }) &&
+                                        streamInfo.ResolutionList.some((element: ResolutionInfo) =>
+                                            isEnhancedCodec(element.Codecs),
+                                        ) &&
                                         !state.SkipPlayerReloadOnHevc)
                                 ) {
                                     // Replace OR append a STREAM-INF attribute (replace if present, append after a comma if absent).
@@ -170,24 +176,17 @@ export function hookWorkerFetch(): boolean {
                                     if (decodableResolutionList.length > 0) {
                                         for (let i = 0; i < lines.length - 1; i++) {
                                             if (lines[i].startsWith('#EXT-X-STREAM-INF')) {
-                                                const resSettings = parseAttributes(
-                                                    lines[i].substring(lines[i].indexOf(':') + 1),
-                                                );
-                                                const codecsKey = 'CODECS';
-                                                const lineFamily = videoCodecFamily(resSettings[codecsKey]);
-                                                if (lineFamily === 'hevc' || lineFamily === 'av1') {
+                                                const resSettings = parseAttributes(lines[i]);
+                                                if (isEnhancedCodec(resSettings['CODECS'])) {
                                                     const oldResolution = resSettings['RESOLUTION'];
-                                                    const [targetWidth, targetHeight] = oldResolution
-                                                        .split('x')
-                                                        .map(Number);
-                                                    const targetArea = targetWidth * targetHeight;
+                                                    const targetArea = resolutionArea(oldResolution);
                                                     let newResolutionInfo = null;
                                                     let closestDiff = Infinity;
                                                     for (let j = 0; j < decodableResolutionList.length; j++) {
                                                         const candidate = decodableResolutionList[j];
-                                                        const [streamWidth, streamHeight] =
-                                                            candidate.Resolution.split('x').map(Number);
-                                                        const diff = Math.abs(streamWidth * streamHeight - targetArea);
+                                                        const diff = Math.abs(
+                                                            resolutionArea(candidate.Resolution) - targetArea,
+                                                        );
                                                         if (diff < closestDiff) {
                                                             closestDiff = diff;
                                                             newResolutionInfo = candidate;
@@ -196,7 +195,7 @@ export function hookWorkerFetch(): boolean {
                                                     if (!newResolutionInfo) continue; // unreachable: decodableResolutionList is non-empty here
                                                     console.log(
                                                         'ModifiedM3U8 swap ' +
-                                                            resSettings[codecsKey] +
+                                                            resSettings['CODECS'] +
                                                             ' to ' +
                                                             newResolutionInfo.Codecs +
                                                             ' oldRes:' +
@@ -231,9 +230,7 @@ export function hookWorkerFetch(): boolean {
                                             }
                                         }
                                     }
-                                    if (decodableResolutionList.length > 0 || state.AlwaysReloadPlayerOnAd) {
-                                        streamInfo.ModifiedM3U8 = lines.join('\n');
-                                    }
+                                    streamInfo.ModifiedM3U8 = lines.join('\n');
                                 }
                             }
                             streamInfo.LastSeenAt = Date.now();

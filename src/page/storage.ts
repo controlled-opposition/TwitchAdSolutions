@@ -75,88 +75,93 @@ export function onContentLoaded() {
         runtime.localStorageHookFailed = true;
     }
 }
+type PageState = typeof state;
+type BooleanSetting = { [K in keyof PageState]: PageState[K] extends boolean ? K : never }[keyof PageState];
+// twitchAdSolutions_<key> settings that only take effect when set to `when`, which also gives the
+// new value ('true' → true, 'false' → false). Each logs when it applies.
+const flagOverrides: { key: string; when: 'true' | 'false'; field: BooleanSetting; message: string }[] = [
+    {
+        key: 'preferLowQualityBackup',
+        when: 'false',
+        field: 'PreferLowQualityBackup',
+        message:
+            'PreferLowQualityBackup disabled via localStorage — sticky CSAI path only, no autoplay fallback or escape hatch',
+    },
+    {
+        key: 'fastAutoplayFirstTry',
+        when: 'false',
+        field: 'FastAutoplayFirstTry',
+        message:
+            'FastAutoplayFirstTry disabled via localStorage — full Source-tier probe on every break (no autoplay fast-path)',
+    },
+    {
+        key: 'backupSwapFirst',
+        when: 'false',
+        field: 'BackupSwapFirst',
+        message: 'BackupSwapFirst disabled via localStorage — using sticky CSAI path (strip on native stream)',
+    },
+    {
+        key: 'disableAdSpoofing',
+        when: 'false',
+        field: 'DisableAdSpoofing',
+        message: 'AdSpoofing enabled via localStorage opt-in — firing GQL ad-tracking beacons on ad detect',
+    },
+    {
+        key: 'recoverFromSilentMute',
+        when: 'false',
+        field: 'RecoverFromSilentMute',
+        message:
+            'RecoverFromSilentMute disabled via localStorage — hard-reload backstop respects already-muted state, mid-session manual mutes preserved across reloads',
+    },
+    {
+        key: 'softReloadNoStrip',
+        when: 'false',
+        field: 'SoftReloadNoStrip',
+        message:
+            'SoftReloadNoStrip disabled via localStorage — post-ad reload always hard, even on no-strip CSAI breaks (issue #129)',
+    },
+    {
+        key: 'disablePostBreakWedge',
+        when: 'true',
+        field: 'DisablePostBreakWedge',
+        message:
+            'Post-break video-wedge recovery DISABLED via localStorage — audio-alive/video-frozen after a break will not be auto-recovered',
+    },
+];
+function readSetting(key: string): string | null {
+    return localStorage.getItem('twitchAdSolutions_' + key);
+}
+/** 'true'/'false' setting: null when unset, otherwise whether it is exactly 'true'. */
+function readBoolSetting(key: string): boolean | null {
+    const value = readSetting(key);
+    return value === null ? null : value === 'true';
+}
+/** Numeric setting: null unless it parses to a number >= 0. */
+function readNonNegativeSetting(key: string, parse: (value: string) => number): number | null {
+    const value = parse(readSetting(key) ?? '');
+    return !Number.isNaN(value) && value >= 0 ? value : null;
+}
 // Apply the twitchAdSolutions_* localStorage overrides (documented in README.md / CLAUDE.md).
 export function loadLocalStorageConfig() {
     try {
-        const lsReloadAfterAd = localStorage.getItem('twitchAdSolutions_reloadPlayerAfterAd');
-        if (lsReloadAfterAd !== null) {
-            state.ReloadPlayerAfterAd = lsReloadAfterAd === 'true';
+        state.ReloadPlayerAfterAd = readBoolSetting('reloadPlayerAfterAd') ?? state.ReloadPlayerAfterAd;
+        state.ReloadCooldownSeconds =
+            readNonNegativeSetting('reloadCooldownSeconds', (v) => parseInt(v, 10)) ?? state.ReloadCooldownSeconds;
+        state.DisableReloadCap = readBoolSetting('disableReloadCap') ?? state.DisableReloadCap;
+        state.DriftCorrectionRate =
+            readNonNegativeSetting('driftCorrectionRate', parseFloat) ?? state.DriftCorrectionRate;
+        state.EarlyReloadPollThreshold =
+            readNonNegativeSetting('earlyReloadPollThreshold', (v) => parseInt(v, 10)) ??
+            state.EarlyReloadPollThreshold;
+        state.ForceAccessTokenPlayerType = readSetting('playerType') ?? state.ForceAccessTokenPlayerType;
+        state.PinBackupPlayerType = readBoolSetting('pinBackupPlayerType') ?? state.PinBackupPlayerType;
+        for (const { key, when, field, message } of flagOverrides) {
+            if (readSetting(key) === when) {
+                state[field] = when === 'true';
+                console.log('[AD DEBUG] ' + message);
+            }
         }
-        const lsReloadCooldown = parseInt(localStorage.getItem('twitchAdSolutions_reloadCooldownSeconds') ?? '', 10);
-        if (!Number.isNaN(lsReloadCooldown) && lsReloadCooldown >= 0) {
-            state.ReloadCooldownSeconds = lsReloadCooldown;
-        }
-        const lsDisableReloadCap = localStorage.getItem('twitchAdSolutions_disableReloadCap');
-        if (lsDisableReloadCap !== null) {
-            state.DisableReloadCap = lsDisableReloadCap === 'true';
-        }
-        const lsDriftRate = parseFloat(localStorage.getItem('twitchAdSolutions_driftCorrectionRate') ?? '');
-        if (!Number.isNaN(lsDriftRate) && lsDriftRate >= 0) {
-            state.DriftCorrectionRate = lsDriftRate;
-        }
-        const lsEarlyReload = parseInt(localStorage.getItem('twitchAdSolutions_earlyReloadPollThreshold') ?? '', 10);
-        if (!Number.isNaN(lsEarlyReload) && lsEarlyReload >= 0) {
-            state.EarlyReloadPollThreshold = lsEarlyReload;
-        }
-        const lsPlayerType = localStorage.getItem('twitchAdSolutions_playerType');
-        if (lsPlayerType !== null) {
-            state.ForceAccessTokenPlayerType = lsPlayerType;
-        }
-        const lsPinBackup = localStorage.getItem('twitchAdSolutions_pinBackupPlayerType');
-        if (lsPinBackup !== null) {
-            state.PinBackupPlayerType = lsPinBackup === 'true';
-        }
-        const lsPreferLow = localStorage.getItem('twitchAdSolutions_preferLowQualityBackup');
-        if (lsPreferLow === 'false') {
-            state.PreferLowQualityBackup = false;
-            console.log(
-                '[AD DEBUG] PreferLowQualityBackup disabled via localStorage — sticky CSAI path only, no autoplay fallback or escape hatch',
-            );
-        }
-        const lsFastAutoplay = localStorage.getItem('twitchAdSolutions_fastAutoplayFirstTry');
-        if (lsFastAutoplay === 'false') {
-            state.FastAutoplayFirstTry = false;
-            console.log(
-                '[AD DEBUG] FastAutoplayFirstTry disabled via localStorage — full Source-tier probe on every break (no autoplay fast-path)',
-            );
-        }
-        const lsBackupSwapFirst = localStorage.getItem('twitchAdSolutions_backupSwapFirst');
-        if (lsBackupSwapFirst === 'false') {
-            state.BackupSwapFirst = false;
-            console.log(
-                '[AD DEBUG] BackupSwapFirst disabled via localStorage — using sticky CSAI path (strip on native stream)',
-            );
-        }
-        const lsDisableAdSpoofing = localStorage.getItem('twitchAdSolutions_disableAdSpoofing');
-        if (lsDisableAdSpoofing === 'false') {
-            state.DisableAdSpoofing = false;
-            console.log(
-                '[AD DEBUG] AdSpoofing enabled via localStorage opt-in — firing GQL ad-tracking beacons on ad detect',
-            );
-        }
-        const lsRecoverFromSilentMute = localStorage.getItem('twitchAdSolutions_recoverFromSilentMute');
-        if (lsRecoverFromSilentMute === 'false') {
-            state.RecoverFromSilentMute = false;
-            console.log(
-                '[AD DEBUG] RecoverFromSilentMute disabled via localStorage — hard-reload backstop respects already-muted state, mid-session manual mutes preserved across reloads',
-            );
-        }
-        const lsSoftReloadNoStrip = localStorage.getItem('twitchAdSolutions_softReloadNoStrip');
-        if (lsSoftReloadNoStrip === 'false') {
-            state.SoftReloadNoStrip = false;
-            console.log(
-                '[AD DEBUG] SoftReloadNoStrip disabled via localStorage — post-ad reload always hard, even on no-strip CSAI breaks (issue #129)',
-            );
-        }
-        const lsDisablePostBreakWedge = localStorage.getItem('twitchAdSolutions_disablePostBreakWedge');
-        if (lsDisablePostBreakWedge === 'true') {
-            state.DisablePostBreakWedge = true;
-            console.log(
-                '[AD DEBUG] Post-break video-wedge recovery DISABLED via localStorage — audio-alive/video-frozen after a break will not be auto-recovered',
-            );
-        }
-        const lsHideAdOverlay = localStorage.getItem('twitchAdSolutions_hideAdOverlay');
-        if (lsHideAdOverlay === 'true') {
+        if (readSetting('hideAdOverlay') === 'true') {
             const style = document.createElement('style');
             style.textContent = '.tas-adblock-overlay { display: none !important; }';
             (document.head || document.documentElement).appendChild(style);

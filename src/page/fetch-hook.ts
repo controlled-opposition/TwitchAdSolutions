@@ -8,7 +8,8 @@ import { postTwitchWorkerMessage } from './workers.ts';
 // is one vaft never sees — nothing stripped, no backup searched, nothing else in the log.
 // The previous once-per-session latch could not surface that at all.
 const csaiRequestCounts: Record<string, { inBreak: number; noBreak: number }> = Object.create(null);
-export function countCsaiRequest(csaiType: string, transport: 'fetch' | 'xhr') {
+function countCsaiRequest(url: string, transport: 'fetch' | 'xhr') {
+    const csaiType = url.includes('bp=midroll') ? 'midroll' : url.includes('bp=preroll') ? 'preroll' : 'unknown';
     const inBreak = playerBufferState.inAdBreak === true;
     let c = csaiRequestCounts[csaiType];
     if (!c) {
@@ -138,12 +139,7 @@ export function hookFetch() {
                 }
             }
             if (url.includes('edge.ads.twitch.tv')) {
-                const csaiType = url.includes('bp=midroll')
-                    ? 'midroll'
-                    : url.includes('bp=preroll')
-                      ? 'preroll'
-                      : 'unknown';
-                countCsaiRequest(csaiType, 'fetch');
+                countCsaiRequest(url, 'fetch');
             }
         }
         // biome-ignore lint/suspicious/noExplicitAny: forwards the caller's arguments untouched (the real fetch has overloads)
@@ -160,12 +156,7 @@ export function hookXhr() {
     const realXHROpen = XMLHttpRequest.prototype.open;
     const hook = maskAsNative(function (this: XMLHttpRequest, _method: string, url: string | URL) {
         if (typeof url === 'string' && url.includes('edge.ads.twitch.tv')) {
-            const csaiType = url.includes('bp=midroll')
-                ? 'midroll'
-                : url.includes('bp=preroll')
-                  ? 'preroll'
-                  : 'unknown';
-            countCsaiRequest(csaiType, 'xhr');
+            countCsaiRequest(url, 'xhr');
         }
         // biome-ignore lint/suspicious/noExplicitAny: forwards whichever open() overload the caller used
         return realXHROpen.apply(this, arguments as any);

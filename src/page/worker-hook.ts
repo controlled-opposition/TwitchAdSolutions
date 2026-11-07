@@ -22,7 +22,7 @@ const workerStringReinsert = [
     '${patch_url}', // TwitchNoSub (0.9.1)
 ];
 // Walk the Worker prototype chain and remove conflicting overrides
-export function getCleanWorker(worker: typeof Worker): typeof Worker | null {
+function getCleanWorker(worker: typeof Worker): typeof Worker | null {
     let root = null;
     let parent = null;
     let proto = worker;
@@ -47,7 +47,7 @@ export function getCleanWorker(worker: typeof Worker): typeof Worker | null {
     }
     return root;
 }
-export function getWorkersForReinsert(worker: typeof Worker): object[] {
+function getWorkersForReinsert(worker: typeof Worker): object[] {
     const result = [];
     let proto = worker;
     while (proto) {
@@ -59,7 +59,7 @@ export function getWorkersForReinsert(worker: typeof Worker): object[] {
     }
     return result;
 }
-export function reinsertWorkers(worker: typeof Worker, reinsert: object[]): typeof Worker {
+function reinsertWorkers(worker: typeof Worker, reinsert: object[]): typeof Worker {
     let parent = worker;
     for (let i = 0; i < reinsert.length; i++) {
         // Per-link try-catch: a foreign extension that froze a single proto entry
@@ -129,10 +129,6 @@ export function hookWindowWorker() {
             // hookWorkerFetch twice and double-process every m3u8 response.
             // Reuse it as-is, but still register below so its messages are heard.
             const alreadyHooked = prefetchedWorkerJs.includes('hookWorkerFetch');
-            // The worker bundle is one self-contained function (src/worker/index.ts), so its
-            // source text runs as-is in the worker; the page's settings ride along as JSON.
-            const init: WorkerInit = { twitchBlobUrl, config: pickSharedConfig(state) };
-            const newBlobStr = `(${runWorker.toString()})(${JSON.stringify(init)});`;
             if (alreadyHooked) {
                 super(twitchBlobUrl, options);
                 console.log('[AD DEBUG] Worker already hooked — reusing without re-injection');
@@ -144,6 +140,10 @@ export function hookWindowWorker() {
                         originalRevokeObjectURL.call(URL, injectedBlobUrl);
                     } catch {}
                 }
+                // The worker bundle is one self-contained function (src/worker/index.ts), so its
+                // source text runs as-is in the worker; the page's settings ride along as JSON.
+                const init: WorkerInit = { twitchBlobUrl, config: pickSharedConfig(state) };
+                const newBlobStr = `(${runWorker.toString()})(${JSON.stringify(init)});`;
                 injectedBlobUrl = URL.createObjectURL(new Blob([newBlobStr]));
                 super(injectedBlobUrl, options);
             }
@@ -166,9 +166,9 @@ export function hookWindowWorker() {
                         cancelDriftCorrection();
                     }
                 } else if (e.data.key === 'PauseResumePlayer') {
-                    doTwitchPlayerTask(true, false);
+                    doTwitchPlayerTask('pausePlay');
                 } else if (e.data.key === 'ReloadPlayer') {
-                    doTwitchPlayerTask(false, true, e.data.kind);
+                    doTwitchPlayerTask('reload', e.data.kind);
                 }
             });
             this.addEventListener('message', async (event: MessageEvent<WorkerToPageMessage>) => {
@@ -197,7 +197,7 @@ export function hookWindowWorker() {
                         ' — triggering hard reload to recover',
                 );
                 try {
-                    doTwitchPlayerTask(false, true, 'early');
+                    doTwitchPlayerTask('reload', 'early');
                 } catch (err) {
                     console.log('[AD DEBUG] Worker crash recovery failed: ' + (err as Error).message);
                 }
@@ -218,7 +218,7 @@ export function hookWindowWorker() {
         },
     });
 }
-export async function handleWorkerFetchRequest(fetchRequest: WorkerFetchRequest): Promise<WorkerFetchResponse> {
+async function handleWorkerFetchRequest(fetchRequest: WorkerFetchRequest): Promise<WorkerFetchResponse> {
     // 5s AbortController timeout. The worker uses this path for GQL requests
     // (access tokens + ad-spoof beacons). Without a timeout, a hung GQL endpoint
     // would block the worker's backup-search loop indefinitely (until browser's

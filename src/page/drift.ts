@@ -3,8 +3,7 @@ import { state } from './state.ts';
 
 let driftCatchUpInterval: ReturnType<typeof setInterval> | null = null;
 let driftCatchUpTimeout: ReturnType<typeof setTimeout> | null = null;
-export function startDriftCorrection(videoElement: HTMLVideoElement) {
-    if (state.DriftCorrectionRate <= 1) return;
+function clearDriftTimers() {
     if (driftCatchUpInterval) {
         clearInterval(driftCatchUpInterval);
         driftCatchUpInterval = null;
@@ -13,6 +12,10 @@ export function startDriftCorrection(videoElement: HTMLVideoElement) {
         clearTimeout(driftCatchUpTimeout);
         driftCatchUpTimeout = null;
     }
+}
+export function startDriftCorrection(videoElement: HTMLVideoElement) {
+    if (state.DriftCorrectionRate <= 1) return;
+    clearDriftTimers();
     videoElement.playbackRate = state.DriftCorrectionRate;
     console.log('[AD DEBUG] Drift correction: catching up at ' + state.DriftCorrectionRate + 'x');
     driftCatchUpInterval = setInterval(() => {
@@ -22,12 +25,7 @@ export function startDriftCorrection(videoElement: HTMLVideoElement) {
                 if (vid.buffered.end(vid.buffered.length - 1) - vid.currentTime <= 1) {
                     vid.playbackRate = 1.0;
                     console.log('[AD DEBUG] Drift correction complete — resumed normal playback speed');
-                    clearInterval(driftCatchUpInterval ?? undefined);
-                    driftCatchUpInterval = null;
-                    if (driftCatchUpTimeout) {
-                        clearTimeout(driftCatchUpTimeout);
-                        driftCatchUpTimeout = null;
-                    }
+                    clearDriftTimers();
                 }
             }
         } catch {
@@ -50,14 +48,7 @@ export function startDriftCorrection(videoElement: HTMLVideoElement) {
 export function cancelDriftCorrection() {
     // Clear drift catch-up when ads start — don't run 1.1x during ad handling
     if (driftCatchUpInterval || driftCatchUpTimeout) {
-        if (driftCatchUpInterval) {
-            clearInterval(driftCatchUpInterval);
-            driftCatchUpInterval = null;
-        }
-        if (driftCatchUpTimeout) {
-            clearTimeout(driftCatchUpTimeout);
-            driftCatchUpTimeout = null;
-        }
+        clearDriftTimers();
         try {
             const v = getPlayerVideoElement();
             if (v) v.playbackRate = 1.0;

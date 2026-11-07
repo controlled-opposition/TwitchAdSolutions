@@ -48,6 +48,8 @@ export interface TwitchPlayerState {
 
 /** Cached #root element (never changes in React SPAs). */
 let cachedRootNode: ReactRootElement | null = null;
+/** Own-property key of #root that holds the React 18 root fiber, once found. */
+let cachedContainerKey: string | null = null;
 // "Not found" log state (see the grace period at the end of getPlayerAndState).
 let firstPlayerNullAt = 0;
 let loggedNoPlayer = false;
@@ -55,20 +57,34 @@ let firstStateNullAt = 0;
 let loggedNoState = false;
 // Traverse React's fiber tree to find Twitch's player and player state instances
 export function getPlayerAndState() {
-    /** Returns the matching component instance (Twitch internals, untyped). */
-    function findReactNode(root: ReactFiber, constraint: (stateNode: ReactInstance) => unknown): ReactInstance {
-        if (root.stateNode && constraint(root.stateNode)) {
-            return root.stateNode;
-        }
-        let node = root.child;
-        while (node) {
-            const result: ReactInstance = findReactNode(node, constraint);
-            if (result) {
-                return result;
+    /**
+     * One pre-order walk of the fiber tree returning, for each constraint, the first component
+     * instance that satisfies it (Twitch internals, untyped). Stops once every constraint has
+     * matched, so finding several instances costs one walk instead of one each.
+     */
+    function findReactNodes(root: ReactFiber, constraints: ((stateNode: ReactInstance) => unknown)[]): ReactInstance[] {
+        const found: ReactInstance[] = constraints.map(() => null);
+        let remaining = constraints.length;
+        function visit(fiber: ReactFiber): boolean {
+            const stateNode = fiber.stateNode;
+            if (stateNode) {
+                for (let i = 0; i < constraints.length; i++) {
+                    if (!found[i] && constraints[i](stateNode)) {
+                        found[i] = stateNode;
+                        if (--remaining === 0) return true;
+                    }
+                }
             }
-            node = node.sibling;
+            for (let node = fiber.child; node; node = node.sibling) {
+                if (visit(node)) return true;
+            }
+            return false;
         }
-        return null;
+        visit(root);
+        return found;
+    }
+    function findReactNode(root: ReactFiber, constraint: (stateNode: ReactInstance) => unknown): ReactInstance {
+        return findReactNodes(root, [constraint])[0];
     }
     function findReactRootNode(): ReactFiber | null {
         let reactRootNode: ReactFiber | null = null;
@@ -85,11 +101,12 @@ export function getPlayerAndState() {
             reactRootNode = rootNode._reactRootContainer._internalRoot.current;
         }
         if (reactRootNode == null && rootNode != null) {
-            const containerName = Object.keys(rootNode).find(
-                (x) => x.startsWith('__reactContainer') || x.startsWith('__reactFiber'),
-            );
-            if (containerName != null) {
-                reactRootNode = rootNode[containerName];
+            // React 18 keeps the root fiber under a per-page randomised key; find it once.
+            cachedContainerKey ??=
+                Object.keys(rootNode).find((x) => x.startsWith('__reactContainer') || x.startsWith('__reactFiber')) ??
+                null;
+            if (cachedContainerKey != null) {
+                reactRootNode = rootNode[cachedContainerKey];
             }
         }
         return reactRootNode;
@@ -98,11 +115,11 @@ export function getPlayerAndState() {
     if (!reactRootNode) {
         return null;
     }
-    // Primary: named property lookup
-    let player = findReactNode(
-        reactRootNode,
+    // Primary: named property lookups for both instances, in a single walk
+    let [player, playerState] = findReactNodes(reactRootNode, [
         (node) => node.setPlayerActive && node.props && node.props.mediaPlayerInstance,
-    );
+        (node) => node.setSrc && node.setInitialPlaybackSettings,
+    ]);
     player = player && player.props && player.props.mediaPlayerInstance ? player.props.mediaPlayerInstance : null;
     if (player?.playerInstance) {
         player = player.playerInstance;
@@ -114,8 +131,6 @@ export function getPlayerAndState() {
             (node) => node.getHTMLVideoElement && node.getBufferDuration && node.core?.state,
         );
     }
-    // Primary: named property lookup
-    const playerState = findReactNode(reactRootNode, (node) => node.setSrc && node.setInitialPlaybackSettings);
     // Fallback: structural match — setSrc exists but setInitialPlaybackSettings was renamed
     const playerStateFallback = !playerState
         ? findReactNode(reactRootNode, (node) => node.setSrc && node.setStreamManagerNode && !node.getHTMLVideoElement)

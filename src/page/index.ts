@@ -80,7 +80,7 @@ function main() {
         window,
         'reloadTwitchPlayer',
         () => {
-            doTwitchPlayerTask(false, true);
+            doTwitchPlayerTask('reload');
         },
         'window.reloadTwitchPlayer',
     );

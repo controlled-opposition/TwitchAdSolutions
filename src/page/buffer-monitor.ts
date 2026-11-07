@@ -4,6 +4,20 @@ import { startDriftCorrection } from './drift.ts';
 import { doTwitchPlayerTask } from './player.ts';
 import { hideTwitchAdOverlays, updateAdblockBanner } from './overlay.ts';
 
+// Grace windows after a player reload and after a backup stream switch (start or end of an ad
+// break): the stall fixes stand down while the player settles.
+const RELOAD_GRACE_MS = 15000;
+const BACKUP_SWITCH_GRACE_MS = 10000;
+/** Whether timestamp `at` is set and less than `ms` ago. */
+function within(at: number, ms: number): boolean {
+    return !!at && Date.now() - at < ms;
+}
+/** Start a fresh recovery window: no stall seen, no fix attempted, reload budget restored. */
+function resetStallRecovery() {
+    playerBufferState.numSame = 0;
+    playerBufferState.fixAttempts = 0;
+    playerBufferState.recoveryReloadUsed = false;
+}
 // Visibility listener: installed once; pendingTick dedupes the immediate tick it schedules.
 let visibilityHooked = false;
 let pendingTick = false;
@@ -47,8 +61,8 @@ export function monitorPlayerBuffering() {
                 playerBufferState.lastFixTime <= Date.now() - state.PlayerBufferingMinRepeatDelay &&
                 !runtime.isActivelyStrippingAds &&
                 !playerBufferState.inAdBreak &&
-                (!playerBufferState.lastReloadAt || Date.now() - playerBufferState.lastReloadAt >= 15000) &&
-                (!playerBufferState.lastBackupSwitchAt || Date.now() - playerBufferState.lastBackupSwitchAt >= 10000)
+                !within(playerBufferState.lastReloadAt, RELOAD_GRACE_MS) &&
+                !within(playerBufferState.lastBackupSwitchAt, BACKUP_SWITCH_GRACE_MS)
             ) {
                 const m3u8Url = player.core?.state?.path;
                 if (m3u8Url) {
@@ -60,9 +74,7 @@ export function monitorPlayerBuffering() {
                         if (playerBufferState.channelName !== channelName) {
                             playerBufferState.channelName = channelName;
                             playerBufferState.hasStreamStarted = false;
-                            playerBufferState.numSame = 0;
-                            playerBufferState.fixAttempts = 0;
-                            playerBufferState.recoveryReloadUsed = false;
+                            resetStallRecovery();
                             playerBufferState.userPauseIntent = false;
                             playerBufferState.loggedPauseIntent = false;
                         }
@@ -106,9 +118,7 @@ export function monitorPlayerBuffering() {
                     // and treat it like a fresh reload (clear counters, set the recovery flag
                     // so the next active poll grants grace).
                     if (videoEl && playerBufferState.videoElement && playerBufferState.videoElement !== videoEl) {
-                        playerBufferState.numSame = 0;
-                        playerBufferState.fixAttempts = 0;
-                        playerBufferState.recoveryReloadUsed = false;
+                        resetStallRecovery();
                     }
                     playerBufferState.videoElement = videoEl;
                     // Stall trigger: position-frozen check now requires BOTH state.position
@@ -194,9 +204,9 @@ export function monitorPlayerBuffering() {
                                         video.paused,
                                 );
                             }
-                            const isPausePlay = escalateToReload ? false : !state.PlayerBufferingDoPlayerReload;
-                            const isReload = escalateToReload ? true : state.PlayerBufferingDoPlayerReload;
-                            doTwitchPlayerTask(isPausePlay, isReload);
+                            doTwitchPlayerTask(
+                                escalateToReload || state.PlayerBufferingDoPlayerReload ? 'reload' : 'pausePlay',
+                            );
                             playerBufferState.lastFixTime = Date.now();
                             playerBufferState.numSame = 0;
                             if (escalateToReload) {
@@ -205,9 +215,7 @@ export function monitorPlayerBuffering() {
                             }
                         }
                     } else {
-                        playerBufferState.numSame = 0;
-                        playerBufferState.fixAttempts = 0;
-                        playerBufferState.recoveryReloadUsed = false;
+                        resetStallRecovery();
                     }
                     // Detect position jump (native gap recovery) — drift to catch up.
                     // Skip during ad breaks and 10s after: backup stream switching causes buffer gaps that trigger false jumps.
@@ -222,8 +230,7 @@ export function monitorPlayerBuffering() {
                         playerBufferState.position > 0 &&
                         position - playerBufferState.position > 5 &&
                         !playerBufferState.inAdBreak &&
-                        (!playerBufferState.lastBackupSwitchAt ||
-                            Date.now() - playerBufferState.lastBackupSwitchAt >= 10000) &&
+                        !within(playerBufferState.lastBackupSwitchAt, BACKUP_SWITCH_GRACE_MS) &&
                         (!playerBufferState.lastDriftStartedAt ||
                             Date.now() - playerBufferState.lastDriftStartedAt >= 30000)
                     ) {
@@ -322,9 +329,7 @@ export function monitorPlayerBuffering() {
                                     playerBufferState.wedgeEvidence = 0;
                                     playerBufferState.wedgeActions = (playerBufferState.wedgeActions || 0) + 1;
                                     const wedgeReload = playerBufferState.wedgeActions >= 2; // nudge first, reload if it recurs
-                                    const recentReload =
-                                        playerBufferState.lastReloadAt &&
-                                        Date.now() - playerBufferState.lastReloadAt < 15000;
+                                    const recentReload = within(playerBufferState.lastReloadAt, RELOAD_GRACE_MS);
                                     console.log(
                                         '[AD DEBUG] Post-break video wedge — playhead advancing at ' +
                                             t.toFixed(1) +
@@ -339,14 +344,14 @@ export function monitorPlayerBuffering() {
                                     if (wedgeReload) {
                                         playerBufferState.wedgeEvalsRemaining = 0;
                                         if (!recentReload) {
-                                            doTwitchPlayerTask(false, true, 'early');
+                                            doTwitchPlayerTask('reload', 'early');
                                         } else {
                                             console.log(
                                                 '[AD DEBUG] Post-break wedge reload SUPPRESSED — a reload fired <15s ago; relying on it',
                                             );
                                         }
                                     } else {
-                                        doTwitchPlayerTask(true, false);
+                                        doTwitchPlayerTask('pausePlay');
                                     }
                                     playerBufferState.lastFixTime = Date.now();
                                 }
@@ -385,8 +390,7 @@ export function monitorPlayerBuffering() {
                 // Don't fire loading-circle reload if ANY reload happened recently — readyState=0
                 // is the expected transient state during a reload's MediaSource teardown. Without
                 // this, an early-reload in flight can trigger a redundant loading-circle reload.
-                const recentReload =
-                    playerBufferState.lastReloadAt && Date.now() - playerBufferState.lastReloadAt < stallReloadCooldown;
+                const recentReload = within(playerBufferState.lastReloadAt, stallReloadCooldown);
                 if (isStalled && cooldownExpired && !recentReload && playerBufferState.hasHadData) {
                     if (!playerBufferState.adStallStartAt) {
                         playerBufferState.adStallStartAt = Date.now();
@@ -401,7 +405,7 @@ export function monitorPlayerBuffering() {
                         playerBufferState.lastAdStallReloadAt = Date.now();
                         playerBufferState.adStallStartAt = 0;
                         // Hard reload: a stuck media player needs its MediaSource rebuilt, not just an m3u8 refetch.
-                        doTwitchPlayerTask(false, true, 'early');
+                        doTwitchPlayerTask('reload', 'early');
                     }
                 } else if (!isStalled) {
                     playerBufferState.adStallStartAt = 0;

@@ -61,12 +61,23 @@ export function videoCodecFamily(codecs: string | undefined): VideoCodecFamily {
     }
     return 'unknown';
 }
+// HEVC and AV1: codecs that can go black for a whole ad break when the backup stream switches
+// to AVC, so a stream carrying them is swapped onto its AVC variants.
+export function isEnhancedCodec(codecs: string | undefined): boolean {
+    const family = videoCodecFamily(codecs);
+    return family === 'hevc' || family === 'av1';
+}
+// Pixel area of an m3u8 RESOLUTION value ('1920x1080'), for picking the closest variant.
+export function resolutionArea(resolution: string): number {
+    const [width, height] = resolution.split('x').map(Number);
+    return width * height;
+}
 export function getStreamUrlForResolution(
     encodingsM3u8: string,
     resolutionInfo: Pick<ResolutionInfo, 'Resolution' | 'FrameRate'>,
 ): string | null {
     const encodingsLines = encodingsM3u8.split(/\r?\n/);
-    const [targetWidth, targetHeight] = resolutionInfo.Resolution.split('x').map(Number);
+    const targetArea = resolutionArea(resolutionInfo.Resolution);
     let matchedResolutionUrl = null;
     let matchedFrameRate = false;
     let closestResolutionUrl = null;
@@ -98,8 +109,7 @@ export function getStreamUrlForResolution(
                         return matchedResolutionUrl;
                     }
                 }
-                const [width, height] = resolution.split('x').map(Number);
-                const difference = Math.abs(width * height - targetWidth * targetHeight);
+                const difference = Math.abs(resolutionArea(resolution) - targetArea);
                 if (difference < closestResolutionDifference) {
                     closestResolutionUrl = encodingsLines[i + 1];
                     closestResolutionDifference = difference;

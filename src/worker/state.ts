@@ -3,7 +3,7 @@
 import { defaultSharedConfig } from '../shared/config.ts';
 import type { PlayerType, StreamInfo } from '../shared/types.ts';
 
-export function createWorkerState() {
+function createWorkerState() {
     return {
         ...defaultSharedConfig(),
         // 'twitch-stitched' catches the twitch-stitched-* DATERANGE class family
@@ -58,7 +58,6 @@ export function createWorkerState() {
         StreamInfosByUrl: Object.create(null) as Record<string, StreamInfo>,
         SimulatedAdsDepth: 0,
         V2API: false,
-        IsAdStrippingEnabled: true,
         /** Ad segment URL -> time it was cached (ms). The worker fetch hook answers these with a blank MP4. */
         AdSegmentCache: new Map<string, number>(),
         AllSegmentsAreAdSegments: false,

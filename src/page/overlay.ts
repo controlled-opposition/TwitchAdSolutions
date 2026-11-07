@@ -94,15 +94,25 @@ export function updateAdblockBanner(data: Partial<AdBlockBannerMessage> & { hasA
         }
         if (adBlockDiv != null) {
             runtime.isActivelyStrippingAds = !!data.isStrippingAdSegments;
+            // The worker sends this on every playlist poll (~2s), mostly unchanged. Write only what
+            // changed: each textContent assignment replaces the text node and wakes every
+            // MutationObserver on the page (Twitch's and other extensions').
             // P is missing if the overlay was created by another (older/duplicate) copy of the script.
-            if (adBlockDiv.P)
-                adBlockDiv.P.textContent =
+            if (adBlockDiv.P) {
+                const text =
                     'Blocking' +
                     (data.isMidroll ? ' midroll' : '') +
                     ' ads' +
                     (data.isStrippingAdSegments ? ' (stripping)' : '') +
-                    (data.activeBackupPlayerType ? ' (' + data.activeBackupPlayerType + ')' : ''); // + (data.numStrippedAdSegments > 0 ? ` (${data.numStrippedAdSegments})` : '');
-            adBlockDiv.style.display = data.hasAds && playerBufferState.isLive ? 'block' : 'none';
+                    (data.activeBackupPlayerType ? ' (' + data.activeBackupPlayerType + ')' : '');
+                if (adBlockDiv.P.textContent !== text) {
+                    adBlockDiv.P.textContent = text;
+                }
+            }
+            const display = data.hasAds && playerBufferState.isLive ? 'block' : 'none';
+            if (adBlockDiv.style.display !== display) {
+                adBlockDiv.style.display = display;
+            }
         }
         if (data.hasAds) {
             hideTwitchAdOverlays();

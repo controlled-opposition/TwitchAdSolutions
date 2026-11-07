@@ -77,7 +77,7 @@ export interface StreamInfo {
     LastCommittedBackupPlayerType: PlayerType | null;
     /** Player type -> failure time (ms); entries expire for retry. */
     FailedBackupPlayerTypes: Map<PlayerType, number>;
-    LoggedBackupAdsByType: Set<PlayerType> | null;
+    LoggedBackupAdsByType: Set<PlayerType>;
     CycleRescuedThisBreak: boolean;
     // Early reload
     EarlyReloadCount: number;

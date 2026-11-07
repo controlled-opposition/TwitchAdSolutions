@@ -2,7 +2,7 @@
 import { defaultSharedConfig } from '../shared/config.ts';
 import type { TwitchMediaPlayer, TwitchPlayerState } from './twitch.ts';
 
-export function createPageState() {
+function createPageState() {
     return {
         ...defaultSharedConfig(),
         RecoverFromSilentMute: true, // On hard reload, if the element is already muted but vaft has successfully unmuted at any point earlier this session, treat it as a silent Twitch re-mute and recover via the backstop. Default on; set twitchAdSolutions_recoverFromSilentMute=false to disable (useful for users who deliberately mute mid-session).

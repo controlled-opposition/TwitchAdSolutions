@@ -8,6 +8,17 @@ export function getMatchedAdSignifiers(textStr: string): string[] {
     return state.AdSignifiers.filter((s) => textStr.includes(s));
 }
 // Remove ad segments from an m3u8 playlist and cache their URLs for replacement
+function matchesAdUrlPattern(url: string): boolean {
+    return state.AdSegmentURLPatterns.some((p) => url.includes(p));
+}
+// A URL already blanked this session, or one that looks like ad media.
+function isKnownAdUrl(url: string): boolean {
+    return !!url && (state.AdSegmentCache.has(url) || matchesAdUrlPattern(url));
+}
+// LL-HLS prefetch/preload hints, which let the player fetch upcoming segments early.
+function isLowLatencyHint(line: string): boolean {
+    return line.startsWith('#EXT-X-TWITCH-PREFETCH:') || line.startsWith('#EXT-X-PRELOAD-HINT:');
+}
 export function stripAdSegments(textStr: string, stripAllSegments: boolean, streamInfo: StreamInfo): string {
     let hasStrippedAdSegments = false;
     let inCueOut = false;
@@ -63,45 +74,39 @@ export function stripAdSegments(textStr: string, stripAllSegments: boolean, stre
             inCueOut = false;
         }
         // Remove tracking urls which appear in the overlay UI
-        lines[i] = line.replaceAll(state.TwitchAdUrlRewriteRegex, `$1${newAdUrl}$2`);
-        const isLiveSegment = line.includes(',live');
-        if (
-            i < lines.length - 1 &&
-            line.startsWith('#EXTINF') &&
-            (!isLiveSegment || stripAllSegments || state.AllSegmentsAreAdSegments || inCueOut)
-        ) {
+        // The rewrite regex needs this literal to match; skip the regex on the (many) lines without it.
+        if (line.includes('X-TV-TWITCH-AD')) {
+            lines[i] = line.replaceAll(state.TwitchAdUrlRewriteRegex, `$1${newAdUrl}$2`);
+        }
+        if (i < lines.length - 1 && line.startsWith('#EXTINF')) {
             const segmentUrl = lines[i + 1];
-            if (!state.AdSegmentCache.has(segmentUrl)) {
+            const isLiveSegment = line.includes(',live');
+            if (!isLiveSegment || stripAllSegments || state.AllSegmentsAreAdSegments || inCueOut) {
+                if (!state.AdSegmentCache.has(segmentUrl)) {
+                    streamInfo.NumStrippedAdSegments++;
+                }
+                state.AdSegmentCache.set(segmentUrl, Date.now());
+                hasStrippedAdSegments = true;
+            } else if (matchesAdUrlPattern(segmentUrl)) {
+                console.log('[AD DEBUG] Ad segment detected via URL pattern: ' + segmentUrl);
+                state.AdSegmentCache.set(segmentUrl, Date.now());
+                hasStrippedAdSegments = true;
                 streamInfo.NumStrippedAdSegments++;
+            } else {
+                liveSegments.push({ extinf: line, url: segmentUrl });
             }
-            state.AdSegmentCache.set(segmentUrl, Date.now());
-            hasStrippedAdSegments = true;
-        } else if (
-            i < lines.length - 1 &&
-            line.startsWith('#EXTINF') &&
-            state.AdSegmentURLPatterns.some((p) => lines[i + 1].includes(p))
-        ) {
-            console.log('[AD DEBUG] Ad segment detected via URL pattern: ' + lines[i + 1]);
-            state.AdSegmentCache.set(lines[i + 1], Date.now());
-            hasStrippedAdSegments = true;
-            streamInfo.NumStrippedAdSegments++;
-        } else if (i < lines.length - 1 && line.startsWith('#EXTINF') && isLiveSegment) {
-            liveSegments.push({ extinf: line, url: lines[i + 1] });
         } else if (line.startsWith('#EXT-X-PART:')) {
             // LL-HLS part: URI is inline as an attribute. Strip if it matches a known
             // ad URL (already in cache from a parallel EXTINF strip, or matches a URL pattern).
             // Without this, the player may use the parts path to fetch ad media via low-latency.
             const partUriMatch = line.match(state.UriAttributeRegex);
             const partUri = partUriMatch ? partUriMatch[1] : '';
-            if (
-                partUri &&
-                (state.AdSegmentCache.has(partUri) || state.AdSegmentURLPatterns.some((p) => partUri.includes(p)))
-            ) {
+            if (isKnownAdUrl(partUri)) {
                 state.AdSegmentCache.set(partUri, Date.now());
                 lines[i] = '';
                 hasStrippedAdSegments = true;
             }
-        } else if (line.startsWith('#EXT-X-TWITCH-PREFETCH:') || line.startsWith('#EXT-X-PRELOAD-HINT:')) {
+        } else if (isLowLatencyHint(line)) {
             // LL-HLS prefetch/preload hints can point at upcoming ad segments before any
             // EXTINF line or ad signifier has materialized in the playlist. If we only
             // strip prefetch hints AFTER hasStrippedAdSegments is set, the first poll of
@@ -116,13 +121,10 @@ export function stripAdSegments(textStr: string, stripAllSegments: boolean, stre
             if (line.startsWith('#EXT-X-TWITCH-PREFETCH:')) {
                 hintUrl = line.substring('#EXT-X-TWITCH-PREFETCH:'.length).trim();
             } else {
-                const hintMatch = line.match(/URI="([^"]+)"/);
+                const hintMatch = line.match(state.UriAttributeRegex);
                 hintUrl = hintMatch ? hintMatch[1] : '';
             }
-            if (
-                hintUrl &&
-                (state.AdSegmentCache.has(hintUrl) || state.AdSegmentURLPatterns.some((p) => hintUrl.includes(p)))
-            ) {
+            if (isKnownAdUrl(hintUrl)) {
                 state.AdSegmentCache.set(hintUrl, Date.now());
                 hasStrippedAdSegments = true;
             }
@@ -139,7 +141,7 @@ export function stripAdSegments(textStr: string, stripAllSegments: boolean, stre
     if (hasStrippedAdSegments) {
         for (let i = 0; i < lines.length; i++) {
             // No low latency during ads (otherwise it's possible for the player to prefetch and display ad segments)
-            if (lines[i].startsWith('#EXT-X-TWITCH-PREFETCH:') || lines[i].startsWith('#EXT-X-PRELOAD-HINT:')) {
+            if (isLowLatencyHint(lines[i])) {
                 lines[i] = '';
             }
         }

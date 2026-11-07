@@ -62,7 +62,7 @@ export function createStreamInfo(channelName: string, encodingsM3u8: string, ush
         PinnedBackupPlayerType: null,
         LastCommittedBackupPlayerType: null,
         FailedBackupPlayerTypes: new Map(), // Map<playerType, timestamp> — failures expire after 15s for retry
-        LoggedBackupAdsByType: null, // lazy-init to Set on first "backup has ads" log
+        LoggedBackupAdsByType: new Set(), // player types seen ad-laden this break. Cleared at break end.
         CycleRescuedThisBreak: false,
         // Early reload
         EarlyReloadCount: 0,
