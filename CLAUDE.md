@@ -1,13 +1,11 @@
-# TwitchAdSolutions (vaft-only fork)
+# TwitchAdSolutions (vaft)
 
-Fork of ryanbr/TwitchAdSolutions, trimmed to the single vaft userscript. Remote `origin` = controlled-opposition fork, remote `upstream` = ryanbr (fetches `master` only).
+Hard fork of ryanbr/TwitchAdSolutions (forked at vaft 68.5.7), trimmed to the single vaft userscript. Not synced with upstream; all code here is owned and maintained in this repo. Remote `origin` = controlled-opposition/TwitchAdSolutions.
 
-## Fork Policy
+## Scope
 
-- The only shipped artifact is `vaft/vaft.user.js`. Don't re-add uBlock Origin scriptlets, testing builds, video-swap-new, strip, brave-fix, or extensions.
-- `vaft/vaft.user.js`, `tests/`, `DEBUG.md`, `LICENSE` are upstream-owned: `scripts/sync-upstream.sh` overwrites them with upstream's version on every sync. Local edits to them will be lost unless also handled in the sync script. The only fork change is the header (`@namespace`, `@updateURL`, `@downloadURL`), which the sync script re-applies.
-- `README.md`, `CLAUDE.md`, `.github/workflows/validate.yml`, `scripts/sync-upstream.sh` are fork-owned; the sync keeps ours.
-- Sync: `scripts/sync-upstream.sh` (merge commit, validates, does not push).
+- The only shipped artifact is `vaft/vaft.user.js`. Don't add uBlock Origin scriptlets, testing builds, other script variants, or extensions.
+- `tests/test.js` and `tests/benchmark.js` test functions *copied* from `vaft.user.js`; when changing one of those functions, update the copy in the tests too.
 
 ## Worker Blob Serialization (CRITICAL)
 
@@ -19,7 +17,7 @@ Functions serialized via `.toString()` into the Web Worker blob CANNOT reference
 
 ## Versions
 
-`@version` (userscript header) and `ourTwitchAdSolutionsVersion` track upstream; they change only via sync.
+Bump `@version` (userscript header) and `ourTwitchAdSolutionsVersion` together for functional changes. `ourTwitchAdSolutionsVersion` also drives duplicate-script detection (a running copy with an equal or higher value makes this one skip), so it must only ever increase.
 
 ## localStorage Config
 

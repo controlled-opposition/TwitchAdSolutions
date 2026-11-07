@@ -1,8 +1,8 @@
-# TwitchAdSolutions (vaft only)
+# TwitchAdSolutions (vaft)
 
-A fork of [ryanbr/TwitchAdSolutions](https://github.com/ryanbr/TwitchAdSolutions) (itself forked from the archived [pixeltris/TwitchAdSolutions](https://github.com/pixeltris/TwitchAdSolutions)) trimmed down to just one thing: the **vaft** userscript.
+A hard fork of [ryanbr/TwitchAdSolutions](https://github.com/ryanbr/TwitchAdSolutions) (itself forked from the archived [pixeltris/TwitchAdSolutions](https://github.com/pixeltris/TwitchAdSolutions)), taken at vaft 68.5.7 and trimmed down to just one thing: the **vaft** userscript.
 
-The other upstream variants (uBlock Origin scriptlets, testing builds, video-swap-new, strip, brave-fix) are deliberately left out. The vaft code itself is unmodified upstream code; only the userscript header is repointed here so updates come from this repo.
+The other upstream variants (uBlock Origin scriptlets, testing builds, video-swap-new, strip, brave-fix) are deliberately left out, and this repo is maintained independently. It does not track upstream.
 
 ## Install
 
@@ -98,15 +98,6 @@ localStorage.removeItem('twitchAdSolutions_backupSwapFirst');
 ## Troubleshooting
 
 See [DEBUG.md](DEBUG.md) for how to read the `[AD DEBUG]` console output.
-
-## Syncing with upstream
-
-```sh
-scripts/sync-upstream.sh   # merges upstream master, keeps only vaft, validates, commits
-git push
-```
-
-The sync takes upstream's `vaft/vaft.user.js`, tests, `DEBUG.md` and `LICENSE` verbatim and re-applies the header changes. It keeps this fork's README, CLAUDE.md, CI and sync script, and drops everything else upstream adds.
 
 ## License
 
