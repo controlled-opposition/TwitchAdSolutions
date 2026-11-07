@@ -1,6 +1,7 @@
 import { installHook } from '../shared/hook.ts';
 import { maskAsNative } from './mask.ts';
 import { playerBufferState, runtime, state } from './state.ts';
+import { getPlayerVideoElement } from './twitch.ts';
 
 // Set up visibility overrides and localStorage hooks to preserve player state across reloads
 export function onContentLoaded() {
@@ -17,17 +18,18 @@ export function onContentLoaded() {
     // Sync'd with TTV-AB v6.5.0.
     let wasVideoPlaying = true;
     const visibilityChange = () => {
-        const videos = document.getElementsByTagName('video');
-        if (videos.length === 0) return;
+        // The player's own element, not a separate Twitch ad <video> (#249).
+        const video = getPlayerVideoElement();
+        if (!video) return;
         if (document.hidden) {
-            wasVideoPlaying = !videos[0].paused && !videos[0].ended;
+            wasVideoPlaying = !video.paused && !video.ended;
             return;
         }
         if (!playerBufferState.hasStreamStarted) {
             playerBufferState.hasStreamStarted = true;
         }
-        if (wasVideoPlaying && !videos[0].ended && videos[0].paused) {
-            videos[0].play()?.catch?.(() => {});
+        if (wasVideoPlaying && !video.ended && video.paused) {
+            video.play()?.catch?.(() => {});
         }
     };
     document.addEventListener('visibilitychange', visibilityChange);
@@ -145,8 +147,6 @@ function readNonNegativeSetting(key: string, parse: (value: string) => number): 
 export function loadLocalStorageConfig() {
     try {
         state.ReloadPlayerAfterAd = readBoolSetting('reloadPlayerAfterAd') ?? state.ReloadPlayerAfterAd;
-        state.ReloadCooldownSeconds =
-            readNonNegativeSetting('reloadCooldownSeconds', (v) => parseInt(v, 10)) ?? state.ReloadCooldownSeconds;
         state.DisableReloadCap = readBoolSetting('disableReloadCap') ?? state.DisableReloadCap;
         state.DriftCorrectionRate =
             readNonNegativeSetting('driftCorrectionRate', parseFloat) ?? state.DriftCorrectionRate;

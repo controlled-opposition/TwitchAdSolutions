@@ -14,6 +14,15 @@ export function pruneStreamInfos() {
             delete state.StreamInfos[channelName];
         }
     }
+    // A stream restart replaces the channel's StreamInfo, and the old one's variant URLs stay in
+    // StreamInfosByUrl (the loop above only reaches the current one's). Drop every entry that no
+    // longer points at its channel's live StreamInfo, so replaced ones can be collected.
+    for (const url in state.StreamInfosByUrl) {
+        const streamInfo = state.StreamInfosByUrl[url];
+        if (state.StreamInfos[streamInfo.ChannelName] !== streamInfo) {
+            delete state.StreamInfosByUrl[url];
+        }
+    }
 }
 // Creates a new StreamInfo with the full field shape declared up-front.
 // When adding a new streamInfo field, declare it here with an appropriate
@@ -73,9 +82,8 @@ export function createStreamInfo(channelName: string, encodingsM3u8: string, ush
         EscapeHatchFired: false,
         LastBreakUsedEscapeHatch: false, // FastAutoplayFirstTry: set when a break commits autoplay via PreferLowQualityBackup escape hatch (= all 4 Source types contaminated this break). Read at next break's backup-search entry to prepend autoplay first. Reset when a Source-tier type wins (channel recovered).
         FastAutoplayConsecutive: 0, // Count of consecutive breaks won by fast-autoplay without testing Source-tier. Triggers periodic re-probe to detect channel recovery (Twitch reversing CSAI delivery). Reset when full Source-tier probe runs or Source-tier wins.
-        // Reload cooldown
+        // Last player reload (post-ad re-entry guards, minimal-request window)
         LastPlayerReload: 0,
-        ReloadTimestamps: [],
         // Diagnostic flags (once-per-session)
         HasCheckedUnknownTags: false,
         HasLoggedAdAttributes: false,

@@ -513,7 +513,7 @@ function workerMasterFetch(worker, url) {
     ]);
 }
 function makeWorkerContext(network) {
-    const worker = loadModules(['src/worker/fetch-hook.ts', 'src/worker/state.ts'], {
+    const worker = loadModules(['src/worker/fetch-hook.ts', 'src/worker/stream-info.ts', 'src/worker/state.ts'], {
         globals: { Response, Blob, URL, atob, setTimeout, clearTimeout, fetch: network },
     });
     worker.hookWorkerFetch();
@@ -561,6 +561,83 @@ asyncTests.push(async () => {
         'repeat request still resolves when the cache probe rejects',
     );
     assert(worker.state.StreamInfos.testchan !== first, 'a rejected probe rebuilds the stream session');
+});
+
+asyncTests.push(async () => {
+    console.log('--- hookWorkerFetch: processing errors pass the playlist through ---');
+    const mediaUrl = 'https://video-edge.example.net/v1/playlist/abc.m3u8';
+    const mediaText = '#EXTM3U\n#EXTINF:2.000,live\nhttps://video-edge.example.net/seg-1.ts';
+    const worker = makeWorkerContext(async (input) => new Response(input === mediaUrl ? mediaText : v2Encodings));
+    const broken = worker.createStreamInfo('testchan', v2Encodings, '');
+    Object.defineProperty(broken, 'LastSeenAt', {
+        set() {
+            throw new Error('boom');
+        },
+    });
+    worker.state.StreamInfosByUrl[mediaUrl] = broken;
+    assertEq(
+        await (await worker.context.fetch(mediaUrl)).text(),
+        mediaText,
+        'media playlist whose processing throws is returned unmodified (was: request never settled)',
+    );
+    worker.state.StreamInfos.testchan = {
+        get EncodingsM3U8() {
+            throw new Error('boom');
+        },
+    };
+    assertEq(
+        await (await worker.context.fetch(masterUrl)).text(),
+        v2Encodings,
+        'master playlist whose processing throws is returned unmodified (was: request never settled)',
+    );
+});
+
+// ============================================================
+// Test: pruneStreamInfos drops URLs of replaced stream sessions
+// ============================================================
+{
+    console.log('--- pruneStreamInfos ---');
+    const w = loadModules(['src/worker/stream-info.ts', 'src/worker/state.ts']);
+    const replaced = w.createStreamInfo('chan', '', '');
+    const current = w.createStreamInfo('chan', '', '');
+    w.state.StreamInfos.chan = current;
+    current.Urls['https://new/a.m3u8'] = {};
+    w.state.StreamInfosByUrl['https://old/a.m3u8'] = replaced;
+    w.state.StreamInfosByUrl['https://new/a.m3u8'] = current;
+    w.pruneStreamInfos();
+    assert(!('https://old/a.m3u8' in w.state.StreamInfosByUrl), 'variant URL of a replaced StreamInfo is dropped');
+    assertEq(w.state.StreamInfosByUrl['https://new/a.m3u8'], current, 'current session URLs are kept');
+}
+
+// ============================================================
+// Test: end-of-break cycle-rescue check reads this break's freeze length
+// ============================================================
+asyncTests.push(async () => {
+    console.log('--- end of break: cycle rescue ---');
+    const endBreak = async (totalAllStrippedPolls) => {
+        const posted = [];
+        const w = loadModules(['src/worker/m3u8.ts', 'src/worker/stream-info.ts', 'src/worker/state.ts'], {
+            globals: { postMessage: (m) => posted.push(m), setTimeout, fetch: async () => new Response('') },
+        });
+        const url = 'https://video-edge.example.net/v1/playlist/abc.m3u8';
+        w.state.StreamInfosByUrl[url] = Object.assign(w.createStreamInfo('chan', '', ''), {
+            IsShowingAd: true,
+            CleanPlaylistCount: 2, // this poll is the third clean one
+            NumStrippedAdSegments: 4,
+            CycleRescuedThisBreak: true,
+            TotalAllStrippedPolls: totalAllStrippedPolls,
+        });
+        await w.processM3U8(url, '#EXTM3U\n#EXTINF:2.000,live\nhttps://edge/seg-1.ts', fetch);
+        return posted.map((m) => m.key);
+    };
+    assert(
+        !(await endBreak(1)).includes('ReloadPlayer'),
+        'short freeze rescued by a backup switch: no end-of-break reload',
+    );
+    assert(
+        (await endBreak(5)).includes('ReloadPlayer'),
+        'long freeze (>2 all-stripped polls): end-of-break reload still fires (was skipped: the count was reset first)',
+    );
 });
 
 // ============================================================

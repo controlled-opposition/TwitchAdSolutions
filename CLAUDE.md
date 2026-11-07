@@ -37,7 +37,6 @@ All read at init (`loadLocalStorageConfig()` in `src/page/storage.ts`); the ones
 - `twitchAdSolutions_playerType` — string, default `popout`
 - `twitchAdSolutions_pinBackupPlayerType` — `true`/`false`, default `true`
 - `twitchAdSolutions_hideAdOverlay` — `true` to hide the internal `.tas-adblock-overlay` banner (SDA wrapper hide always runs), default not set
-- `twitchAdSolutions_reloadCooldownSeconds` — number, default `30` (0 to disable)
 - `twitchAdSolutions_disableReloadCap` — `true` to revert to unlimited reloads
 - `twitchAdSolutions_driftCorrectionRate` — number, default `1.1` (0 to disable)
 - `twitchAdSolutions_earlyReloadPollThreshold` — number, default `3` (0 to disable; thin cache overrides to 1)
@@ -57,7 +56,7 @@ All read at init (`loadLocalStorageConfig()` in `src/page/storage.ts`); the ones
 ## Key Architecture (vaft)
 
 - **Buffer monitor** (`monitorPlayerBuffering`) — polls player state every 1-3s (visibility-aware). Detects stalls, fires pause/play or reload.
-- **Reload cooldown** — 30s default, auto-escalates to 90s if 3+ reloads in 5 minutes.
+- **No end-of-break reload cooldown** — the post-ad reload is rate-limited by the break cycle itself (#162). The former `reloadCooldownSeconds` setting only fed a log line and was removed in v69.2.0.
 - **Reload cap** — buffer monitor reloads at most once per recovery window (`recoveryReloadUsed`).
 - **Grace periods** — 15s after reload, 10s after backup switch. Buffer monitor skips fixes during these.
 - **Drift correction** — `startDriftCorrection(videoElement)` shared function. 1.1× playback rate, 30s safety timeout. Restarts fresh on re-entry (clears stale timers). Used by post-reload drift and buffer gap seek.
@@ -67,7 +66,7 @@ All read at init (`loadLocalStorageConfig()` in `src/page/storage.ts`); the ones
 - **Latency-aware reload health check** — measures `seekable.end - currentTime` before skipping post-ad reload. If >7s behind live or seekable unavailable/garbage, proceeds with reload. Guards against 2^30 sentinel values via `Number.isFinite` + 3600s cap.
 - **User pause intent** — tracks video pause/play events to distinguish user vs script pauses. `weJustPaused` only resets when player wasn't paused (guards against clearing intent during stall recovery).
 - **Stale player ref** — `playerForMonitoringBuffering = null` on reload to force re-acquisition.
-- **StreamInfo factory** — `createStreamInfo()` (`src/worker/stream-info.ts`) declares all fields up-front (51 fields).
+- **StreamInfo factory** — `createStreamInfo()` (`src/worker/stream-info.ts`) declares all fields up-front (50 fields).
 
 ## Debug Logging
 
@@ -100,7 +99,7 @@ Use the dev shell's esbuild: the up-to-date check compares bytes, so a different
 
 TypeScript 7 (`tsconfig.base.json`, extended by `tsconfig.json` for the page + shared code with the DOM lib, and `src/worker/tsconfig.json` for the worker with the webworker lib). `strict` is on; tsc only checks, esbuild builds.
 - Imports use explicit `.ts` extensions and `import type` for types (`verbatimModuleSyntax`, `erasableSyntaxOnly`).
-- `StreamInfo` is built by `createStreamInfo()` with every field up front (51 fields); a field missing from it or from the interface is a type error.
+- `StreamInfo` is built by `createStreamInfo()` with every field up front (50 fields); a field missing from it or from the interface is a type error.
 - Twitch internals reached through React (`TwitchMediaPlayer`, `TwitchPlayerState`, `ReactFiber` in `src/page/twitch.ts`) are typed with only the members vaft uses, all optional where Twitch may drop them; component instances are deliberately `any` (`ReactInstance`).
 - Behaviour-neutral casts where the checker can't follow the code: `(err as Error).message` in catch blocks, `arguments as any` when forwarding to the real `fetch`/`setItem`/`open`. Don't "fix" these by changing runtime behaviour.
 

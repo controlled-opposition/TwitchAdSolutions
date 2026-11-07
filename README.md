@@ -46,11 +46,6 @@ The script supports runtime configuration via `localStorage`. Set values in the 
 - `true` - remember which backup player type worked and try it first on next ad break (saves backup search time) (default)
 - `false` - always iterate through backup types fresh
 
-**`twitchAdSolutions_reloadCooldownSeconds`** (default: `30`)
-- Minimum seconds between player reloads after ad breaks
-- Prevents CSAI (client-side ad insertion) cascades where a reload triggers Twitch to serve another ad
-- Set to `0` to disable cooldown
-
 **`twitchAdSolutions_disableReloadCap`** (default: not set)
 - `true` - buffer monitor reloads unlimited times (pre-v47 behavior, risk of reload loops)
 - Not set - buffer monitor reloads at most once per recovery window (default)
@@ -81,7 +76,6 @@ localStorage.removeItem('twitchAdSolutions_reloadPlayerAfterAd');
 localStorage.removeItem('twitchAdSolutions_playerType');
 localStorage.removeItem('twitchAdSolutions_hideAdOverlay');
 localStorage.removeItem('twitchAdSolutions_pinBackupPlayerType');
-localStorage.removeItem('twitchAdSolutions_reloadCooldownSeconds');
 localStorage.removeItem('twitchAdSolutions_disableReloadCap');
 localStorage.removeItem('twitchAdSolutions_preferLowQualityBackup');
 localStorage.removeItem('twitchAdSolutions_backupSwapFirst');

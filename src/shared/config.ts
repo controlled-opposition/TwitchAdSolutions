@@ -7,7 +7,6 @@ import type { SharedConfig } from './types.ts';
 export function defaultSharedConfig(): SharedConfig {
     return {
         ReloadPlayerAfterAd: true, // After the ad finishes do a player reload instead of pause/play
-        ReloadCooldownSeconds: 30, // Minimum seconds between reloads — breaks CSAI cascades triggered by reload
         EarlyReloadPollThreshold: 3, // Number of consecutive all-stripped polls before triggering early reload (each poll ~2s, so 3 = ~6s, 5 = ~10s, 10 = ~20s; 0 = disable). Lowered from 5 to 3 to match the testing variant — field reports indicate faster early-reload recovers heavier SSAI breaks more cleanly. Override via localStorage twitchAdSolutions_earlyReloadPollThreshold.
         PinBackupPlayerType: true, // Remember which backup player type worked and try it first on next ad break
         PreferLowQualityBackup: true, // Hybrid safety net for SSAI-heavy breaks: sticky escape hatch (fires after ~8s stuck in all-stripped state) + autoplay (360p) as last-resort backup when all Source types are ad-laden. Default on; set twitchAdSolutions_preferLowQualityBackup=false to disable.

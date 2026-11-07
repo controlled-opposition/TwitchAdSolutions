@@ -185,8 +185,8 @@ export function hookWindowWorker() {
             // (e.g. "index out of bounds") and die. A single crash fires multiple
             // error events; dedupe via a local flag. On first error, trigger a
             // hard reload via the main reload path — Twitch re-spawns the worker
-            // as part of the new player instance, and existing reload cooldown
-            // prevents runaway restart loops.
+            // as part of the new player instance. The crashed flag limits this to
+            // one reload per worker, so a crashing worker can't loop restarts.
             let crashed = false;
             this.addEventListener('error', (e: ErrorEvent) => {
                 if (crashed) return;

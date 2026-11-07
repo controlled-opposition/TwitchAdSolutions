@@ -88,9 +88,8 @@ export interface StreamInfo {
     EscapeHatchFired: boolean;
     LastBreakUsedEscapeHatch: boolean;
     FastAutoplayConsecutive: number;
-    // Reload cooldown
+    // Last player reload (post-ad re-entry guards, minimal-request window)
     LastPlayerReload: number;
-    ReloadTimestamps: number[];
     // Diagnostic flags
     HasCheckedUnknownTags: boolean;
     HasLoggedAdAttributes: boolean;
@@ -118,7 +117,6 @@ export type M3u8Attributes = Record<string, any>;
  */
 export interface SharedConfig {
     ReloadPlayerAfterAd: boolean;
-    ReloadCooldownSeconds: number;
     EarlyReloadPollThreshold: number;
     PinBackupPlayerType: boolean;
     PreferLowQualityBackup: boolean;

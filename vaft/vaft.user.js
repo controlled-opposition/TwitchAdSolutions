@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAdSolutions (vaft)
 // @namespace    https://github.com/controlled-opposition/TwitchAdSolutions
-// @version      69.1.0
+// @version      69.2.0
 // @description  Multiple solutions for blocking Twitch ads (vaft)
 // @updateURL    https://github.com/controlled-opposition/TwitchAdSolutions/raw/master/vaft/vaft.user.js
 // @downloadURL  https://github.com/controlled-opposition/TwitchAdSolutions/raw/master/vaft/vaft.user.js
@@ -157,8 +157,6 @@
     return {
       ReloadPlayerAfterAd: true,
       // After the ad finishes do a player reload instead of pause/play
-      ReloadCooldownSeconds: 30,
-      // Minimum seconds between reloads — breaks CSAI cascades triggered by reload
       EarlyReloadPollThreshold: 3,
       // Number of consecutive all-stripped polls before triggering early reload (each poll ~2s, so 3 = ~6s, 5 = ~10s, 10 = ~20s; 0 = disable). Lowered from 5 to 3 to match the testing variant — field reports indicate faster early-reload recovers heavier SSAI breaks more cleanly. Override via localStorage twitchAdSolutions_earlyReloadPollThreshold.
       PinBackupPlayerType: true,
@@ -539,22 +537,22 @@
         if (currentPersistenceLS !== null) {
           localStorage.setItem(lsKeyPersistence, currentPersistenceLS);
         }
-        const videos = document.getElementsByTagName("video");
+        const video2 = getPlayerVideoElement();
         const userIntendedMute = currentMutedLS && currentMutedLS.includes('"default":true');
-        if (videos.length > 0 && videos[0].muted && !userIntendedMute) {
-          videos[0].muted = false;
+        if (video2 && video2.muted && !userIntendedMute) {
+          video2.muted = false;
         }
-        if (videos.length > 0 && videos[0].buffered.length > 0 && videos[0].readyState >= 3) {
-          const liveEdge = videos[0].buffered.end(videos[0].buffered.length - 1);
-          const drift = liveEdge - videos[0].currentTime;
+        if (video2 && video2.buffered.length > 0 && video2.readyState >= 3) {
+          const liveEdge = video2.buffered.end(video2.buffered.length - 1);
+          const drift = liveEdge - video2.currentTime;
           if (hardReload && drift > 5 && Number.isFinite(liveEdge) && liveEdge < 3600) {
             console.log(
               "[AD DEBUG] Post-hard-reload seek to live — " + drift.toFixed(1) + "s behind, jumping to live edge to flush A/V drift"
             );
-            videos[0].currentTime = liveEdge;
+            video2.currentTime = liveEdge;
           } else if (drift > 2) {
             console.log("[AD DEBUG] Post-reload live drift correction: " + drift.toFixed(1) + "s behind");
-            startDriftCorrection(videos[0]);
+            startDriftCorrection(video2);
           }
         }
       } catch {
@@ -1057,17 +1055,17 @@
     }
     let wasVideoPlaying = true;
     const visibilityChange = () => {
-      const videos = document.getElementsByTagName("video");
-      if (videos.length === 0) return;
+      const video = getPlayerVideoElement();
+      if (!video) return;
       if (document.hidden) {
-        wasVideoPlaying = !videos[0].paused && !videos[0].ended;
+        wasVideoPlaying = !video.paused && !video.ended;
         return;
       }
       if (!playerBufferState.hasStreamStarted) {
         playerBufferState.hasStreamStarted = true;
       }
-      if (wasVideoPlaying && !videos[0].ended && videos[0].paused) {
-        videos[0].play()?.catch?.(() => {
+      if (wasVideoPlaying && !video.ended && video.paused) {
+        video.play()?.catch?.(() => {
         });
       }
     };
@@ -1167,7 +1165,6 @@
   function loadLocalStorageConfig() {
     try {
       state.ReloadPlayerAfterAd = readBoolSetting("reloadPlayerAfterAd") ?? state.ReloadPlayerAfterAd;
-      state.ReloadCooldownSeconds = readNonNegativeSetting("reloadCooldownSeconds", (v) => parseInt(v, 10)) ?? state.ReloadCooldownSeconds;
       state.DisableReloadCap = readBoolSetting("disableReloadCap") ?? state.DisableReloadCap;
       state.DriftCorrectionRate = readNonNegativeSetting("driftCorrectionRate", parseFloat) ?? state.DriftCorrectionRate;
       state.EarlyReloadPollThreshold = readNonNegativeSetting("earlyReloadPollThreshold", (v) => parseInt(v, 10)) ?? state.EarlyReloadPollThreshold;
@@ -1260,8 +1257,6 @@
     return {
       ReloadPlayerAfterAd: true,
       // After the ad finishes do a player reload instead of pause/play
-      ReloadCooldownSeconds: 30,
-      // Minimum seconds between reloads — breaks CSAI cascades triggered by reload
       EarlyReloadPollThreshold: 3,
       // Number of consecutive all-stripped polls before triggering early reload (each poll ~2s, so 3 = ~6s, 5 = ~10s, 10 = ~20s; 0 = disable). Lowered from 5 to 3 to match the testing variant — field reports indicate faster early-reload recovers heavier SSAI breaks more cleanly. Override via localStorage twitchAdSolutions_earlyReloadPollThreshold.
       PinBackupPlayerType: true,
@@ -2217,6 +2212,7 @@
           );
         }
         const hadStrippedSegments = streamInfo.NumStrippedAdSegments > 0;
+        const totalAllStrippedPolls = streamInfo.TotalAllStrippedPolls;
         if (!hadStrippedSegments && !streamInfo.HasConfirmedAdAttrs) {
           streamInfo.ConsecutiveZeroStripBreaks++;
           if (streamInfo.ConsecutiveZeroStripBreaks >= 3) {
@@ -2258,21 +2254,15 @@
             const reason = isAutoplay ? "autoplay (360p) — restoring Source quality" : streamInfo.LastCommittedBackupPlayerType + " — flushing MediaSource to prevent A/V desync accumulation";
             console.log("[AD DEBUG] End-of-break reload: " + reason);
             streamInfo.LastPlayerReload = Date.now();
-            streamInfo.ReloadTimestamps.push(Date.now());
             postToPage({ key: "ReloadPlayer", kind: "early" });
           }
         } else {
-          streamInfo.ReloadTimestamps = streamInfo.ReloadTimestamps.filter((t) => Date.now() - t < 3e5);
-          const recentReloads = streamInfo.ReloadTimestamps.length;
-          const effectiveCooldown = recentReloads >= 3 ? state.ReloadCooldownSeconds * 3 : state.ReloadCooldownSeconds;
-          const tooSoonSinceLastReload = streamInfo.LastPlayerReload && Date.now() - streamInfo.LastPlayerReload < effectiveCooldown * 1e3;
-          const cycleRescuedCleanly = streamInfo.CycleRescuedThisBreak && (streamInfo.TotalAllStrippedPolls || 0) <= 2 && (streamInfo.EarlyReloadCount || 0) === 0;
+          const cycleRescuedCleanly = streamInfo.CycleRescuedThisBreak && totalAllStrippedPolls <= 2 && streamInfo.EarlyReloadCount === 0;
           if (cycleRescuedCleanly) {
             console.log("[AD DEBUG] Cycle rescue handled the break cleanly — skipping end-of-break reload");
           }
           const shouldReload = streamInfo.IsUsingModifiedM3U8 || state.ReloadPlayerAfterAd && hadStrippedSegments && !cycleRescuedCleanly;
           if (shouldReload) {
-            streamInfo.ReloadTimestamps.push(Date.now());
             streamInfo.IsUsingModifiedM3U8 = false;
             streamInfo.LastPlayerReload = Date.now();
             const reloadKind = state.SoftReloadNoStrip && !hadStrippedSegments ? "post-ad" : "early";
@@ -2281,11 +2271,6 @@
               kind: reloadKind
             });
           } else {
-            if (tooSoonSinceLastReload) {
-              console.log(
-                "[AD DEBUG] Skipping reload — last reload was " + ((Date.now() - streamInfo.LastPlayerReload) / 1e3).toFixed(0) + "s ago (cooldown: " + effectiveCooldown + "s" + (recentReloads >= 3 ? ", auto-escalated from " + recentReloads + " reloads in 5min" : "") + ")"
-              );
-            }
             postToPage({
               key: "PauseResumePlayer"
             });
@@ -2347,6 +2332,12 @@
           }
         }
         delete state.StreamInfos[channelName];
+      }
+    }
+    for (const url in state.StreamInfosByUrl) {
+      const streamInfo = state.StreamInfosByUrl[url];
+      if (state.StreamInfos[streamInfo.ChannelName] !== streamInfo) {
+        delete state.StreamInfosByUrl[url];
       }
     }
   }
@@ -2416,9 +2407,8 @@
       // FastAutoplayFirstTry: set when a break commits autoplay via PreferLowQualityBackup escape hatch (= all 4 Source types contaminated this break). Read at next break's backup-search entry to prepend autoplay first. Reset when a Source-tier type wins (channel recovered).
       FastAutoplayConsecutive: 0,
       // Count of consecutive breaks won by fast-autoplay without testing Source-tier. Triggers periodic re-probe to detect channel recovery (Twitch reversing CSAI delivery). Reset when full Source-tier probe runs or Source-tier wins.
-      // Reload cooldown
+      // Last player reload (post-ad re-entry guards, minimal-request window)
       LastPlayerReload: 0,
-      ReloadTimestamps: [],
       // Diagnostic flags (once-per-session)
       HasCheckedUnknownTags: false,
       HasLoggedAdAttributes: false,
@@ -2437,6 +2427,16 @@
   }
 
   // src/worker/fetch-hook.ts
+  async function passThroughOnError(kind, original, rewrite) {
+    try {
+      return new Response(await rewrite());
+    } catch (err) {
+      console.log(
+        "[AD DEBUG] Failed to process " + kind + " — passing it through unmodified: " + err.message
+      );
+      return new Response(original);
+    }
+  }
   function hookWorkerFetch() {
     console.log("[AD DEBUG] hookWorkerFetch (vaft)");
     const BLANK_MP4 = new Blob(
@@ -2458,20 +2458,16 @@
         }
         url = url.trimEnd();
         if (url.endsWith("m3u8")) {
-          return new Promise(function(resolve, reject) {
-            const processAfter = async function(response) {
-              if (response.status === 200) {
-                resolve(new Response(await processM3U8(url, await response.text(), realFetch)));
-              } else {
-                resolve(response);
-              }
-            };
-            realFetch(url, options).then(function(response) {
-              processAfter(response);
-            })["catch"](function(err) {
-              reject(err);
-            });
-          });
+          const response = await realFetch(url, options);
+          if (response.status !== 200) {
+            return response;
+          }
+          const text = await response.text();
+          return passThroughOnError(
+            "media playlist",
+            text,
+            async () => processM3U8(url, text, realFetch)
+          );
         } else if (url.includes("/channel/hls/") && !url.includes("picture-by-picture")) {
           state.V2API = url.includes("/api/v2/");
           const parsedUrl = new URL(url);
@@ -2480,151 +2476,140 @@
             parsedUrl.searchParams.delete("parent_domains");
             url = parsedUrl.toString();
           }
-          return new Promise(function(resolve, reject) {
-            const processAfter = async function(response) {
-              if (response.status === 200) {
-                const encodingsM3u8 = await response.text();
-                const serverTime = getServerTimeFromM3u8(encodingsM3u8);
-                let streamInfo = state.StreamInfos[channelName];
-                if (streamInfo != null && streamInfo.EncodingsM3U8 != null) {
-                  const probeUrl = streamInfo.EncodingsM3U8.match(/^https:.*\.m3u8$/m)?.[0] || streamInfo.EncodingsM3U8.match(/^https:\/\/\S+$/m)?.[0];
-                  let cacheAlive = false;
-                  if (probeUrl) {
-                    try {
-                      cacheAlive = (await realFetch(probeUrl)).status === 200;
-                    } catch {
-                    }
-                  }
-                  if (!cacheAlive) {
-                    streamInfo = null;
-                  }
+          const response = await realFetch(url, options);
+          if (response.status !== 200) {
+            return response;
+          }
+          const encodingsM3u8 = await response.text();
+          return passThroughOnError("master playlist", encodingsM3u8, async () => {
+            const serverTime = getServerTimeFromM3u8(encodingsM3u8);
+            let streamInfo = state.StreamInfos[channelName];
+            if (streamInfo != null && streamInfo.EncodingsM3U8 != null) {
+              const probeUrl = streamInfo.EncodingsM3U8.match(/^https:.*\.m3u8$/m)?.[0] || streamInfo.EncodingsM3U8.match(/^https:\/\/\S+$/m)?.[0];
+              let cacheAlive = false;
+              if (probeUrl) {
+                try {
+                  cacheAlive = (await realFetch(probeUrl)).status === 200;
+                } catch {
                 }
-                if (streamInfo == null || streamInfo.EncodingsM3U8 == null) {
-                  state.HasTriggeredPlayerReload = false;
-                  console.log(
-                    "[AD DEBUG] New stream session — channel: " + channelName + ", API: " + (state.V2API ? "v2" : "v1")
-                  );
-                  state.StreamInfos[channelName] = streamInfo = createStreamInfo(
-                    channelName,
-                    encodingsM3u8,
-                    parsedUrl.search
-                  );
-                  const lines = encodingsM3u8.split(/\r?\n/);
-                  for (let i = 0; i < lines.length - 1; i++) {
-                    if (lines[i].startsWith("#EXT-X-STREAM-INF") && lines[i + 1].includes(".m3u8")) {
-                      const attributes = parseAttributes(lines[i]);
-                      const resolution = attributes["RESOLUTION"];
-                      if (resolution) {
-                        const resolutionInfo = {
-                          Resolution: resolution,
-                          FrameRate: attributes["FRAME-RATE"],
-                          // || '' like the three below: CODECS is optional on a STREAM-INF line,
-                          // and this entry is pushed whenever RESOLUTION is present. Leaving it
-                          // undefined is what let a direct .startsWith() reader throw and hang the
-                          // master-playlist fetch. Keep every field in this object string-valued.
-                          Codecs: attributes["CODECS"] || "",
-                          // AUDIO/VIDEO/SUBTITLES groups are copied onto the rewritten STREAM-INF
-                          // line during HEVC→AVC fallback so the variant references matching media
-                          // groups (mirrors TTV-AB v6.7.5 parser fix). Without these, the rewritten
-                          // line keeps the original HEVC variant's group ids, which point at audio
-                          // tracks the AVC backup may not carry — black screen / audio desync.
-                          Audio: attributes["AUDIO"] || "",
-                          Video: attributes["VIDEO"] || "",
-                          Subtitles: attributes["SUBTITLES"] || "",
-                          Url: lines[i + 1]
-                        };
-                        streamInfo.Urls[lines[i + 1]] = resolutionInfo;
-                        streamInfo.ResolutionList.push(resolutionInfo);
-                      }
-                      state.StreamInfosByUrl[lines[i + 1]] = streamInfo;
-                    }
-                  }
-                  if (streamInfo.ResolutionList.length === 0) {
-                    console.log(
-                      "[AD DEBUG] No resolutions parsed from encodings m3u8 — Twitch may have changed the format"
-                    );
-                  }
-                  const decodableResolutionList = streamInfo.ResolutionList.filter(
-                    (element) => videoCodecFamily(element.Codecs) === "avc"
-                  );
-                  if (state.AlwaysReloadPlayerOnAd || decodableResolutionList.length > 0 && streamInfo.ResolutionList.some(
-                    (element) => isEnhancedCodec(element.Codecs)
-                  ) && !state.SkipPlayerReloadOnHevc) {
-                    const replaceOrAppendStreamInfAttr = (line, key, value) => {
-                      if (typeof value !== "string" || !value) return line;
-                      const escaped = value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-                      const next = key + '="' + escaped + '"';
-                      const pattern = new RegExp("(^|,)" + key + '=("[^"]*"|[^,]*)');
-                      return pattern.test(line) ? line.replace(pattern, "$1" + next) : line + "," + next;
+              }
+              if (!cacheAlive) {
+                streamInfo = null;
+              }
+            }
+            if (streamInfo == null || streamInfo.EncodingsM3U8 == null) {
+              state.HasTriggeredPlayerReload = false;
+              console.log(
+                "[AD DEBUG] New stream session — channel: " + channelName + ", API: " + (state.V2API ? "v2" : "v1")
+              );
+              state.StreamInfos[channelName] = streamInfo = createStreamInfo(
+                channelName,
+                encodingsM3u8,
+                parsedUrl.search
+              );
+              const lines = encodingsM3u8.split(/\r?\n/);
+              for (let i = 0; i < lines.length - 1; i++) {
+                if (lines[i].startsWith("#EXT-X-STREAM-INF") && lines[i + 1].includes(".m3u8")) {
+                  const attributes = parseAttributes(lines[i]);
+                  const resolution = attributes["RESOLUTION"];
+                  if (resolution) {
+                    const resolutionInfo = {
+                      Resolution: resolution,
+                      FrameRate: attributes["FRAME-RATE"],
+                      // || '' like the three below: CODECS is optional on a STREAM-INF line,
+                      // and this entry is pushed whenever RESOLUTION is present. Leaving it
+                      // undefined is what let a direct .startsWith() reader throw and hang the
+                      // master-playlist fetch. Keep every field in this object string-valued.
+                      Codecs: attributes["CODECS"] || "",
+                      // AUDIO/VIDEO/SUBTITLES groups are copied onto the rewritten STREAM-INF
+                      // line during HEVC→AVC fallback so the variant references matching media
+                      // groups (mirrors TTV-AB v6.7.5 parser fix). Without these, the rewritten
+                      // line keeps the original HEVC variant's group ids, which point at audio
+                      // tracks the AVC backup may not carry — black screen / audio desync.
+                      Audio: attributes["AUDIO"] || "",
+                      Video: attributes["VIDEO"] || "",
+                      Subtitles: attributes["SUBTITLES"] || "",
+                      Url: lines[i + 1]
                     };
-                    if (decodableResolutionList.length > 0) {
-                      for (let i = 0; i < lines.length - 1; i++) {
-                        if (lines[i].startsWith("#EXT-X-STREAM-INF")) {
-                          const resSettings = parseAttributes(lines[i]);
-                          if (isEnhancedCodec(resSettings["CODECS"])) {
-                            const oldResolution = resSettings["RESOLUTION"];
-                            const targetArea = resolutionArea(oldResolution);
-                            let newResolutionInfo = null;
-                            let closestDiff = Infinity;
-                            for (let j = 0; j < decodableResolutionList.length; j++) {
-                              const candidate = decodableResolutionList[j];
-                              const diff = Math.abs(
-                                resolutionArea(candidate.Resolution) - targetArea
-                              );
-                              if (diff < closestDiff) {
-                                closestDiff = diff;
-                                newResolutionInfo = candidate;
-                              }
-                            }
-                            if (!newResolutionInfo) continue;
-                            console.log(
-                              "ModifiedM3U8 swap " + resSettings["CODECS"] + " to " + newResolutionInfo.Codecs + " oldRes:" + oldResolution + " newRes:" + newResolutionInfo.Resolution
-                            );
-                            lines[i] = lines[i].replace(
-                              /CODECS="[^"]+"/,
-                              `CODECS="${newResolutionInfo.Codecs}"`
-                            );
-                            lines[i] = replaceOrAppendStreamInfAttr(
-                              lines[i],
-                              "AUDIO",
-                              newResolutionInfo.Audio
-                            );
-                            lines[i] = replaceOrAppendStreamInfAttr(
-                              lines[i],
-                              "VIDEO",
-                              newResolutionInfo.Video
-                            );
-                            lines[i] = replaceOrAppendStreamInfAttr(
-                              lines[i],
-                              "SUBTITLES",
-                              newResolutionInfo.Subtitles
-                            );
-                            lines[i + 1] = newResolutionInfo.Url + " ".repeat(i + 1);
+                    streamInfo.Urls[lines[i + 1]] = resolutionInfo;
+                    streamInfo.ResolutionList.push(resolutionInfo);
+                  }
+                  state.StreamInfosByUrl[lines[i + 1]] = streamInfo;
+                }
+              }
+              if (streamInfo.ResolutionList.length === 0) {
+                console.log(
+                  "[AD DEBUG] No resolutions parsed from encodings m3u8 — Twitch may have changed the format"
+                );
+              }
+              const decodableResolutionList = streamInfo.ResolutionList.filter(
+                (element) => videoCodecFamily(element.Codecs) === "avc"
+              );
+              if (state.AlwaysReloadPlayerOnAd || decodableResolutionList.length > 0 && streamInfo.ResolutionList.some(
+                (element) => isEnhancedCodec(element.Codecs)
+              ) && !state.SkipPlayerReloadOnHevc) {
+                const replaceOrAppendStreamInfAttr = (line, key, value) => {
+                  if (typeof value !== "string" || !value) return line;
+                  const escaped = value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+                  const next = key + '="' + escaped + '"';
+                  const pattern = new RegExp("(^|,)" + key + '=("[^"]*"|[^,]*)');
+                  return pattern.test(line) ? line.replace(pattern, "$1" + next) : line + "," + next;
+                };
+                if (decodableResolutionList.length > 0) {
+                  for (let i = 0; i < lines.length - 1; i++) {
+                    if (lines[i].startsWith("#EXT-X-STREAM-INF")) {
+                      const resSettings = parseAttributes(lines[i]);
+                      if (isEnhancedCodec(resSettings["CODECS"])) {
+                        const oldResolution = resSettings["RESOLUTION"];
+                        const targetArea = resolutionArea(oldResolution);
+                        let newResolutionInfo = null;
+                        let closestDiff = Infinity;
+                        for (let j = 0; j < decodableResolutionList.length; j++) {
+                          const candidate = decodableResolutionList[j];
+                          const diff = Math.abs(
+                            resolutionArea(candidate.Resolution) - targetArea
+                          );
+                          if (diff < closestDiff) {
+                            closestDiff = diff;
+                            newResolutionInfo = candidate;
                           }
                         }
+                        if (!newResolutionInfo) continue;
+                        console.log(
+                          "ModifiedM3U8 swap " + resSettings["CODECS"] + " to " + newResolutionInfo.Codecs + " oldRes:" + oldResolution + " newRes:" + newResolutionInfo.Resolution
+                        );
+                        lines[i] = lines[i].replace(
+                          /CODECS="[^"]+"/,
+                          `CODECS="${newResolutionInfo.Codecs}"`
+                        );
+                        lines[i] = replaceOrAppendStreamInfAttr(
+                          lines[i],
+                          "AUDIO",
+                          newResolutionInfo.Audio
+                        );
+                        lines[i] = replaceOrAppendStreamInfAttr(
+                          lines[i],
+                          "VIDEO",
+                          newResolutionInfo.Video
+                        );
+                        lines[i] = replaceOrAppendStreamInfAttr(
+                          lines[i],
+                          "SUBTITLES",
+                          newResolutionInfo.Subtitles
+                        );
+                        lines[i + 1] = newResolutionInfo.Url + " ".repeat(i + 1);
                       }
                     }
-                    streamInfo.ModifiedM3U8 = lines.join("\n");
                   }
                 }
-                streamInfo.LastSeenAt = Date.now();
-                resolve(
-                  new Response(
-                    replaceServerTimeInM3u8(
-                      streamInfo.IsUsingModifiedM3U8 && streamInfo.ModifiedM3U8 || streamInfo.EncodingsM3U8,
-                      serverTime
-                    )
-                  )
-                );
-              } else {
-                resolve(response);
+                streamInfo.ModifiedM3U8 = lines.join("\n");
               }
-            };
-            realFetch(url, options).then(function(response) {
-              processAfter(response);
-            })["catch"](function(err) {
-              reject(err);
-            });
+            }
+            streamInfo.LastSeenAt = Date.now();
+            return replaceServerTimeInM3u8(
+              streamInfo.IsUsingModifiedM3U8 && streamInfo.ModifiedM3U8 || streamInfo.EncodingsM3U8,
+              serverTime
+            );
           });
         }
       }
@@ -2946,7 +2931,7 @@
   }
 
   // src/page/index.ts
-  var ourTwitchAdSolutionsVersion = 96;
+  var ourTwitchAdSolutionsVersion = 97;
   function main() {
     let _isNested = false;
     try {

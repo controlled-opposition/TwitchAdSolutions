@@ -314,32 +314,33 @@ export function doTwitchPlayerTask(task: 'pausePlay' | 'reload', reloadKind?: Re
             if (currentPersistenceLS !== null) {
                 localStorage.setItem(lsKeyPersistence, currentPersistenceLS);
             }
-            const videos = document.getElementsByTagName('video');
+            // The player's own element, not a separate Twitch ad <video> (#249).
+            const video = getPlayerVideoElement();
             // Respect user's mute intent: only force-unmute if LS didn't say mute.
             // Twitch writes video-muted as '{"default":true}' when user muted via UI;
             // Chrome autoplay policy can mute even if user didn't (no LS signal).
             const userIntendedMute = currentMutedLS && currentMutedLS.includes('"default":true');
-            if (videos.length > 0 && videos[0].muted && !userIntendedMute) {
-                videos[0].muted = false;
+            if (video && video.muted && !userIntendedMute) {
+                video.muted = false;
             }
             // Correct live drift after reload.
             // For hard reload with large drift (>5s), hard-seek to live edge to flush
             // any A/V timestamp desync from strip+BLANK_MP4+recovery activity. Drift
             // correction at 1.1x would take minutes to catch up 30-60s of drift.
             // For soft reload or small drift, use existing gradual catch-up.
-            if (videos.length > 0 && videos[0].buffered.length > 0 && videos[0].readyState >= 3) {
-                const liveEdge = videos[0].buffered.end(videos[0].buffered.length - 1);
-                const drift = liveEdge - videos[0].currentTime;
+            if (video && video.buffered.length > 0 && video.readyState >= 3) {
+                const liveEdge = video.buffered.end(video.buffered.length - 1);
+                const drift = liveEdge - video.currentTime;
                 if (hardReload && drift > 5 && Number.isFinite(liveEdge) && liveEdge < 3600) {
                     console.log(
                         '[AD DEBUG] Post-hard-reload seek to live — ' +
                             drift.toFixed(1) +
                             's behind, jumping to live edge to flush A/V drift',
                     );
-                    videos[0].currentTime = liveEdge;
+                    video.currentTime = liveEdge;
                 } else if (drift > 2) {
                     console.log('[AD DEBUG] Post-reload live drift correction: ' + drift.toFixed(1) + 's behind');
-                    startDriftCorrection(videos[0]);
+                    startDriftCorrection(video);
                 }
             }
         } catch {}

@@ -699,6 +699,8 @@ export async function processM3U8(url: string, textStr: string, realFetch: typeo
                 );
             }
             const hadStrippedSegments = streamInfo.NumStrippedAdSegments > 0;
+            // Read by the reload decision below, after the per-break reset has zeroed it.
+            const totalAllStrippedPolls = streamInfo.TotalAllStrippedPolls;
             // Only count toward false-positive guard if the m3u8 lacked high-confidence ad markers.
             // Confirmed ads (with X-TV-TWITCH-AD-AD-SESSION-ID etc.) that produce 0 strips are real ads
             // we successfully avoided via clean backup — not false positives.
@@ -763,38 +765,25 @@ export async function processM3U8(url: string, textStr: string, realFetch: typeo
                           ' — flushing MediaSource to prevent A/V desync accumulation';
                     console.log('[AD DEBUG] End-of-break reload: ' + reason);
                     streamInfo.LastPlayerReload = Date.now();
-                    streamInfo.ReloadTimestamps.push(Date.now());
                     postToPage({ key: 'ReloadPlayer', kind: 'early' });
                 }
             } else {
-                // Auto-escalate cooldown: if 3+ reloads in last 5 min, triple the cooldown
-                streamInfo.ReloadTimestamps = streamInfo.ReloadTimestamps.filter((t) => Date.now() - t < 300000);
-                const recentReloads = streamInfo.ReloadTimestamps.length;
-                const effectiveCooldown =
-                    recentReloads >= 3 ? state.ReloadCooldownSeconds * 3 : state.ReloadCooldownSeconds;
-                const tooSoonSinceLastReload =
-                    streamInfo.LastPlayerReload && Date.now() - streamInfo.LastPlayerReload < effectiveCooldown * 1000;
                 // Skip end-of-break reload when cycle rescue handled the break cleanly:
                 // a freeze of ≤2 polls (~4s) was resolved by switching to a clean backup,
                 // and no early reload was needed. The player is on a healthy backup stream
                 // — reloading just to return to the canonical player type causes an unnecessary
                 // ~1-2s loading circle.
                 const cycleRescuedCleanly =
-                    streamInfo.CycleRescuedThisBreak &&
-                    (streamInfo.TotalAllStrippedPolls || 0) <= 2 &&
-                    (streamInfo.EarlyReloadCount || 0) === 0;
+                    streamInfo.CycleRescuedThisBreak && totalAllStrippedPolls <= 2 && streamInfo.EarlyReloadCount === 0;
                 if (cycleRescuedCleanly) {
                     console.log('[AD DEBUG] Cycle rescue handled the break cleanly — skipping end-of-break reload');
                 }
-                // Post-ad reload bypasses cooldown: it's a buffer flush tied to natural break
-                // end, not a cascade-risk retry. The ad break cycle itself rate-limits this
-                // path (once per break). Cooldown still gates buffer-monitor and other
-                // cascade-risk paths that can fire repeatedly in-break.
+                // No cooldown here: this is a buffer flush tied to the natural break end, and the
+                // break cycle itself rate-limits it to once per break (#162).
                 const shouldReload =
                     streamInfo.IsUsingModifiedM3U8 ||
                     (state.ReloadPlayerAfterAd && hadStrippedSegments && !cycleRescuedCleanly);
                 if (shouldReload) {
-                    streamInfo.ReloadTimestamps.push(Date.now());
                     streamInfo.IsUsingModifiedM3U8 = false;
                     streamInfo.LastPlayerReload = Date.now();
                     // Hard reload when buffer may be dirty from strip or m3u8 modification —
@@ -811,19 +800,6 @@ export async function processM3U8(url: string, textStr: string, realFetch: typeo
                         kind: reloadKind,
                     });
                 } else {
-                    if (tooSoonSinceLastReload) {
-                        console.log(
-                            '[AD DEBUG] Skipping reload — last reload was ' +
-                                ((Date.now() - streamInfo.LastPlayerReload) / 1000).toFixed(0) +
-                                's ago (cooldown: ' +
-                                effectiveCooldown +
-                                's' +
-                                (recentReloads >= 3
-                                    ? ', auto-escalated from ' + recentReloads + ' reloads in 5min'
-                                    : '') +
-                                ')',
-                        );
-                    }
                     postToPage({
                         key: 'PauseResumePlayer',
                     });
