@@ -1,20 +1,14 @@
-name: Validate JS
+name: Validate
 
 on:
   push:
-    paths:
-      - "**/*.js"
-      - "**/*.ts"
-      - "tsconfig.json"
-      - "biome.json"
-      - ".github/workflows/validate.yml"
+    paths-ignore:
+      - "**/*.md"
+      - "LICENSE"
   pull_request:
-    paths:
-      - "**/*.js"
-      - "**/*.ts"
-      - "tsconfig.json"
-      - "biome.json"
-      - ".github/workflows/validate.yml"
+    paths-ignore:
+      - "**/*.md"
+      - "LICENSE"
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -23,22 +17,38 @@ jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    # Keep these versions in step with the Nix dev shell (flake.nix / flake.lock).
-    - name: Install acorn, TypeScript and Biome
-      run: |
-        npm install -g acorn@8.19.0 typescript@7.0.2 @biomejs/biome@2.6.4
-        echo "NODE_PATH=$(npm root -g)" >> "$GITHUB_ENV"
+      # Keep these versions in step with the Nix dev shell (flake.nix / flake.lock).
+      - name: Install acorn, TypeScript and Biome
+        run: |
+          npm install -g acorn@8.19.0 typescript@7.0.2 @biomejs/biome@2.6.4
+          echo "NODE_PATH=$(npm root -g)" >> "$GITHUB_ENV"
 
-    - name: Lint and format check (Biome)
-      run: biome ci .
+      - name: Lint and format check (Biome)
+        run: biome ci .
 
-    - name: Validate userscript syntax
-      run: acorn --ecma2022 vaft/vaft.user.js > /dev/null
+      - name: Validate userscript syntax
+        run: acorn --ecma2022 vaft/vaft.user.js > /dev/null
 
-    - name: Type-check userscript
-      run: tsc -p .
+      - name: Type-check userscript
+        run: tsc -p .
 
-    - name: Run unit tests
-      run: node tests/test.js
+      - name: Run unit tests
+        run: node tests/test.js
+
+  nix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v31
+
+      # Builds the checks for this runner's system: currently the treefmt formatting check
+      # (nixfmt, Biome, yamlfmt) over the whole tree.
+      - name: Flake checks
+        run: nix flake check --print-build-logs
+
+      # Evaluates every output for every supported system without building.
+      - name: Evaluate all systems
+        run: nix flake check --all-systems --no-build

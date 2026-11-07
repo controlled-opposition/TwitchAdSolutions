@@ -65,13 +65,14 @@ All logs use `[AD DEBUG]` prefix. Logs in `.toString()` functions must use `cons
 ## Validation
 
 In the Nix dev shell (`nix develop` / direnv):
-- `biome check --write .` — lint + format (CI runs `biome ci .`, which fails on unformatted code or lint errors)
+- `nix fmt` (or `treefmt`) — format everything: nixfmt for `*.nix`, Biome for JS/TS/JSON, yamlfmt for YAML. Markdown is not auto-formatted. `nix flake check` fails on unformatted files.
+- `biome check --write .` — lint + format JS/TS/JSON (CI runs `biome ci .`, which fails on unformatted code or lint errors)
 - `acorn --ecma2022 vaft/vaft.user.js > /dev/null` — syntax
 - `tsc -p .` — type check (must be 0 errors)
 - `node tests/test.js` — unit tests (includes a check that every `${fn.toString()}` worker function loads standalone)
 - `node tests/benchmark.js` — optional perf comparison against the pixeltris baseline
 
-GitHub Actions runs all but the benchmark on push/PR.
+GitHub Actions (`.github/workflows/validate.yml`) runs all but the benchmark on push/PR, plus a `nix` job: `nix flake check` (formatting check) and an all-systems evaluation. Markdown-only changes skip CI.
 
 ## Lint / Format (Biome)
 
