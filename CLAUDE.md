@@ -5,7 +5,7 @@ Hard fork of ryanbr/TwitchAdSolutions (forked at vaft 68.5.7), trimmed to the si
 ## Scope
 
 - The only shipped artifact is `vaft/vaft.user.js`. Don't add uBlock Origin scriptlets, testing builds, other script variants, or extensions.
-- `tests/test.js` and `tests/benchmark.js` test functions *copied* from `vaft.user.js`; when changing one of those functions, update the copy in the tests too.
+- `tests/load-vaft.js` extracts functions from `vaft.user.js` (acorn) and evaluates them in a vm context after `declareOptions(globalThis)`; tests and the benchmark use it, so they always run the shipped code. Shared globals are context properties (`vaft.V2API = true`, `vaft.AdSegmentCache.clear()`).
 
 ## Worker Blob Serialization (CRITICAL)
 
@@ -56,7 +56,7 @@ All read at init, injected into worker blob:
 - **Latency-aware reload health check** — measures `seekable.end - currentTime` before skipping post-ad reload. If >7s behind live or seekable unavailable/garbage, proceeds with reload. Guards against 2^30 sentinel values via `Number.isFinite` + 3600s cap.
 - **User pause intent** — tracks video pause/play events to distinguish user vs script pauses. `weJustPaused` only resets when player wasn't paused (guards against clearing intent during stall recovery).
 - **Stale player ref** — `playerForMonitoringBuffering = null` on reload to force re-acquisition.
-- **StreamInfo factory** — `createStreamInfo()` declares all fields up-front (46 fields). Serialized into worker blob.
+- **StreamInfo factory** — `createStreamInfo()` declares all fields up-front (51 fields). Serialized into worker blob. It is typed `@returns {StreamInfo}`, so a field missing from it or from the `StreamInfo` interface is a type error.
 
 ## Debug Logging
 
@@ -64,7 +64,21 @@ All logs use `[AD DEBUG]` prefix. Logs in `.toString()` functions must use `cons
 
 ## Validation
 
-`npx acorn --ecma2022 vaft/vaft.user.js` and `node tests/test.js` (tests use functions copied from vaft.user.js). GitHub Actions runs both on push/PR.
+In the Nix dev shell (`nix develop` / direnv):
+- `acorn --ecma2022 vaft/vaft.user.js > /dev/null` — syntax
+- `tsc -p .` — type check (must be 0 errors)
+- `node tests/test.js` — unit tests (includes a check that every `${fn.toString()}` worker function loads standalone)
+- `node tests/benchmark.js` — optional perf comparison against the pixeltris baseline
+
+GitHub Actions runs the first three on push/PR.
+
+## Types
+
+`vaft.user.js` stays plain JavaScript and ships as written; TypeScript (7.x, `tsconfig.json`) only checks it via `checkJs`.
+- `types/vaft.d.ts` holds the declarations: every `declareOptions()` global, `StreamInfo`/`ResolutionInfo`, the worker⇄page message unions (`WorkerToPageMessage`, `PageToWorkerValues`), and `Window` additions. Adding a `scope.X` in `declareOptions()` or a field in `createStreamInfo()` means adding it there too.
+- Annotate functions with JSDoc (`@param`, `@returns`). Worker `postMessage(...)` calls wrap the literal in `/** @satisfies {WorkerToPageMessage} */ (...)` because the global `postMessage` signature accepts anything.
+- Per-function state on worker-serialized functions lives in function properties (`notifyAdComplete.loggedNoMatch`), not outer variables (which don't exist in the worker). Declare each one with a falsy default right after the function so the checker knows it.
+- Strict mode is off. Remaining cost to enable: `strictNullChecks` ~106 errors, `noImplicitAny` ~138.
 
 ## Backup Player Types
 

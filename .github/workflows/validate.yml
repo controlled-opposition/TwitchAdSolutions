@@ -4,9 +4,15 @@ on:
   push:
     paths:
       - "**/*.js"
+      - "**/*.ts"
+      - "tsconfig.json"
+      - ".github/workflows/validate.yml"
   pull_request:
     paths:
       - "**/*.js"
+      - "**/*.ts"
+      - "tsconfig.json"
+      - ".github/workflows/validate.yml"
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -17,11 +23,17 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Install acorn
-      run: npm install -g acorn
+    # Keep these versions in step with the Nix dev shell (flake.nix / flake.lock).
+    - name: Install acorn and TypeScript
+      run: |
+        npm install -g acorn@8.19.0 typescript@7.0.2
+        echo "NODE_PATH=$(npm root -g)" >> "$GITHUB_ENV"
 
-    - name: Validate userscript
+    - name: Validate userscript syntax
       run: acorn --ecma2022 vaft/vaft.user.js > /dev/null
+
+    - name: Type-check userscript
+      run: tsc -p .
 
     - name: Run unit tests
       run: node tests/test.js

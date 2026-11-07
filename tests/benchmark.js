@@ -1,4 +1,4 @@
-// Performance benchmark: ryanbr v51 vs pixeltris baseline
+// Performance benchmark: current vaft vs pixeltris baseline
 // Run: node tests/benchmark.js
 //
 // Measures CPU time and memory for the hot-path functions that run
@@ -155,122 +155,17 @@ const pixeltris = (() => {
 })();
 
 // ============================================================
-// ryanbr v51 functions
+// Current vaft functions, loaded from vaft/vaft.user.js
 // ============================================================
 
-const ryanbr = (() => {
-    const AdSignifiers = ['stitched', 'stitched-ad', 'maf-ad', 'X-TV-TWITCH-AD', 'EXT-X-CUE-OUT', 'EXT-X-DATERANGE:CLASS="twitch-stitched-ad"', 'EXT-X-DATERANGE:CLASS="twitch-stream-source"', 'EXT-X-DATERANGE:CLASS="twitch-trigger"', 'EXT-X-DATERANGE:CLASS="twitch-maf-ad"', 'EXT-X-DATERANGE:CLASS="twitch-ad-quartile"', 'SCTE35-OUT'];
-    const AdSegmentURLPatterns = ['/adsquared/', '/_404/', '/processing'];
-    const AdSegmentCache = new Map();
-    let AllSegmentsAreAdSegments = false;
-
-    function hasAdTags(textStr) {
-        return AdSignifiers.some((s) => textStr.includes(s));
-    }
-
-    function stripAdSegments(textStr, stripAllSegments, streamInfo) {
-        let hasStrippedAdSegments = false;
-        let inCueOut = false;
-        const liveSegments = [];
-        const lines = textStr.split(/\r?\n/);
-        const newAdUrl = 'https://twitch.tv';
-        if (!streamInfo.HasLoggedAdAttributes) {
-            const adAttrs = textStr.match(/X-TV-TWITCH-AD[A-Z-]*(?==")/g);
-            if (adAttrs && adAttrs.length > 0) {
-                streamInfo.HasLoggedAdAttributes = true;
-                // skip console.log in benchmark
-            }
-        }
-        for (let i = 0; i < lines.length; i++) {
-            let line = lines[i];
-            if (line.includes('EXT-X-CUE-OUT')) {
-                inCueOut = true;
-            } else if (line.includes('EXT-X-CUE-IN')) {
-                inCueOut = false;
-            }
-            lines[i] = line
-                .replaceAll(/(X-TV-TWITCH-AD(?:-[A-Z]+)*-URLS?=")[^"]*(")/g, `$1${newAdUrl}$2`);
-            const isLiveSegment = line.includes(',live');
-            if (i < lines.length - 1 && line.startsWith('#EXTINF') && (!isLiveSegment || stripAllSegments || AllSegmentsAreAdSegments || inCueOut)) {
-                const segmentUrl = lines[i + 1];
-                if (!AdSegmentCache.has(segmentUrl)) {
-                    streamInfo.NumStrippedAdSegments++;
-                }
-                AdSegmentCache.set(segmentUrl, Date.now());
-                hasStrippedAdSegments = true;
-            } else if (i < lines.length - 1 && line.startsWith('#EXTINF') && AdSegmentURLPatterns.some((p) => lines[i + 1].includes(p))) {
-                AdSegmentCache.set(lines[i + 1], Date.now());
-                hasStrippedAdSegments = true;
-                streamInfo.NumStrippedAdSegments++;
-            } else if (i < lines.length - 1 && line.startsWith('#EXTINF') && isLiveSegment) {
-                liveSegments.push({ extinf: line, url: lines[i + 1] });
-            }
-            if (AdSignifiers.some((s) => line.includes(s))) {
-                hasStrippedAdSegments = true;
-            }
-        }
-        if (hasStrippedAdSegments) {
-            for (let i = 0; i < lines.length; i++) {
-                if (lines[i].startsWith('#EXT-X-TWITCH-PREFETCH:')) {
-                    lines[i] = '';
-                }
-            }
-        } else {
-            streamInfo.NumStrippedAdSegments = 0;
-        }
-        if (liveSegments.length > 0) {
-            streamInfo.RecoverySegments = liveSegments.slice(-6);
-            const seq = parseInt((textStr.match(/#EXT-X-MEDIA-SEQUENCE:(\d+)/) || [])[1]);
-            if (!isNaN(seq)) {
-                streamInfo.RecoveryStartSeq = seq + Math.max(0, liveSegments.length - streamInfo.RecoverySegments.length);
-            }
-        }
-        if (hasStrippedAdSegments && liveSegments.length === 0 && streamInfo.RecoverySegments && streamInfo.RecoverySegments.length > 0) {
-            if (streamInfo.RecoveryStartSeq !== undefined) {
-                for (let j = 0; j < lines.length; j++) {
-                    if (lines[j].startsWith('#EXT-X-MEDIA-SEQUENCE:')) {
-                        lines[j] = '#EXT-X-MEDIA-SEQUENCE:' + streamInfo.RecoveryStartSeq;
-                        break;
-                    }
-                }
-            }
-            for (let j = 0; j < streamInfo.RecoverySegments.length; j++) {
-                lines.push(streamInfo.RecoverySegments[j].extinf);
-                lines.push(streamInfo.RecoverySegments[j].url);
-            }
-        }
-        streamInfo.IsStrippingAdSegments = hasStrippedAdSegments;
-        const now = Date.now();
-        AdSegmentCache.forEach((value, key, map) => {
-            if (value < now - 120000) {
-                map.delete(key);
-            }
-        });
-        return lines.join('\n');
-    }
-
-    function parseAttributes(str) {
-        if (!str) return {};
-        if (str.charCodeAt(0) === 35) {
-            const idx = str.indexOf(':');
-            if (idx !== -1) str = str.slice(idx + 1);
-        }
-        return Object.fromEntries(
-            str.split(/(?:^|,)((?:[^=]*)=(?:"[^"]*"|[^,]*))/)
-            .filter(Boolean)
-            .map(x => {
-                const idx = x.indexOf('=');
-                const key = x.substring(0, idx);
-                const value = x.substring(idx + 1);
-                const num = Number(value);
-                return [key, Number.isNaN(num) ? value.startsWith('"') ? JSON.parse(value) : value : num];
-            }));
-    }
-
-    function reset() { AdSegmentCache.clear(); }
-
-    return { hasAdTags, stripAdSegments, parseAttributes, reset };
-})();
+const { loadVaft } = require('./load-vaft');
+const vaftContext = loadVaft(['hasAdTags', 'stripAdSegments', 'parseAttributes', 'createStreamInfo']);
+const vaft = {
+    hasAdTags: vaftContext.hasAdTags,
+    stripAdSegments: vaftContext.stripAdSegments,
+    parseAttributes: vaftContext.parseAttributes,
+    reset() { vaftContext.AdSegmentCache.clear(); },
+};
 
 // ============================================================
 // Benchmark harness
@@ -297,27 +192,21 @@ function bench(name, fn, iterations = 50000) {
     return { name, elapsed: elapsed.toFixed(2), opsPerSec, heapDelta, iterations };
 }
 
-function compare(label, pixeltrisFn, ryanbrFn, iterations) {
+function compare(label, pixeltrisFn, vaftFn, iterations) {
     const p = bench('pixeltris', pixeltrisFn, iterations);
-    const r = bench('ryanbr', ryanbrFn, iterations);
+    const r = bench('vaft', vaftFn, iterations);
     const ratio = (p.elapsed / r.elapsed).toFixed(2);
-    const winner = ratio > 1 ? 'ryanbr' : ratio < 1 ? 'pixeltris' : 'tie';
+    const winner = ratio > 1 ? 'vaft' : ratio < 1 ? 'pixeltris' : 'tie';
     const speedup = ratio > 1 ? ratio + 'x faster' : (1/ratio).toFixed(2) + 'x slower';
 
     console.log(`\n--- ${label} (${p.iterations} iterations) ---`);
     console.log(`  pixeltris:  ${p.elapsed}ms  (${p.opsPerSec} ops/s, heap delta: ${p.heapDelta} KB)`);
-    console.log(`  ryanbr:     ${r.elapsed}ms  (${r.opsPerSec} ops/s, heap delta: ${r.heapDelta} KB)`);
-    console.log(`  result:     ryanbr is ${speedup}`);
+    console.log(`  vaft:       ${r.elapsed}ms  (${r.opsPerSec} ops/s, heap delta: ${r.heapDelta} KB)`);
+    console.log(`  result:     vaft is ${speedup}`);
 }
 
 function makeStreamInfo() {
-    return {
-        NumStrippedAdSegments: 0,
-        IsStrippingAdSegments: false,
-        HasLoggedAdAttributes: false,
-        RecoverySegments: [],
-        RecoveryStartSeq: undefined
-    };
+    return vaftContext.createStreamInfo('benchchannel', null, '');
 }
 
 // ============================================================
@@ -332,7 +221,7 @@ console.log(`GC exposed: ${typeof global.gc === 'function' ? 'yes' : 'no (run wi
 compare(
     'hasAdTags (clean playlist)',
     () => pixeltris.hasAdTags(CLEAN_PLAYLIST),
-    () => ryanbr.hasAdTags(CLEAN_PLAYLIST),
+    () => vaft.hasAdTags(CLEAN_PLAYLIST),
     200000
 );
 
@@ -340,7 +229,7 @@ compare(
 compare(
     'hasAdTags (ad playlist)',
     () => pixeltris.hasAdTags(AD_PLAYLIST),
-    () => ryanbr.hasAdTags(AD_PLAYLIST),
+    () => vaft.hasAdTags(AD_PLAYLIST),
     200000
 );
 
@@ -348,7 +237,7 @@ compare(
 compare(
     'stripAdSegments (clean playlist)',
     () => { pixeltris.reset(); pixeltris.stripAdSegments(CLEAN_PLAYLIST, false, makeStreamInfo()); },
-    () => { ryanbr.reset(); ryanbr.stripAdSegments(CLEAN_PLAYLIST, false, makeStreamInfo()); },
+    () => { vaft.reset(); vaft.stripAdSegments(CLEAN_PLAYLIST, false, makeStreamInfo()); },
     50000
 );
 
@@ -356,15 +245,15 @@ compare(
 compare(
     'stripAdSegments (ad playlist)',
     () => { pixeltris.reset(); pixeltris.stripAdSegments(AD_PLAYLIST, false, makeStreamInfo()); },
-    () => { ryanbr.reset(); ryanbr.stripAdSegments(AD_PLAYLIST, false, makeStreamInfo()); },
+    () => { vaft.reset(); vaft.stripAdSegments(AD_PLAYLIST, false, makeStreamInfo()); },
     50000
 );
 
-// 5. stripAdSegments — SCTE-35 playlist (ryanbr-only detection)
+// 5. stripAdSegments — SCTE-35 playlist (vaft-only detection)
 compare(
     'stripAdSegments (SCTE-35 playlist)',
     () => { pixeltris.reset(); pixeltris.stripAdSegments(SCTE35_PLAYLIST, false, makeStreamInfo()); },
-    () => { ryanbr.reset(); ryanbr.stripAdSegments(SCTE35_PLAYLIST, false, makeStreamInfo()); },
+    () => { vaft.reset(); vaft.stripAdSegments(SCTE35_PLAYLIST, false, makeStreamInfo()); },
     50000
 );
 
@@ -372,23 +261,23 @@ compare(
 compare(
     'parseAttributes (attribute string)',
     () => pixeltris.parseAttributes(PARSE_ATTR_INPUT),
-    () => ryanbr.parseAttributes(PARSE_ATTR_INPUT),
+    () => vaft.parseAttributes(PARSE_ATTR_INPUT),
     100000
 );
 
-// 7. parseAttributes — full HLS tag line (ryanbr strips prefix)
+// 7. parseAttributes — full HLS tag line (vaft strips prefix)
 compare(
     'parseAttributes (full HLS tag)',
     () => pixeltris.parseAttributes(PARSE_ATTR_TAG),
-    () => ryanbr.parseAttributes(PARSE_ATTR_TAG),
+    () => vaft.parseAttributes(PARSE_ATTR_TAG),
     100000
 );
 
-// 8. parseAttributes — null/empty input (ryanbr guards, pixeltris crashes)
+// 8. parseAttributes — null/empty input (vaft guards, pixeltris crashes)
 compare(
     'parseAttributes (null input)',
     () => { try { pixeltris.parseAttributes(null); } catch {} },
-    () => ryanbr.parseAttributes(null),
+    () => vaft.parseAttributes(null),
     200000
 );
 
@@ -402,9 +291,9 @@ compare(
         }
     },
     () => {
-        ryanbr.reset();
-        if (ryanbr.hasAdTags(AD_PLAYLIST)) {
-            ryanbr.stripAdSegments(AD_PLAYLIST, false, makeStreamInfo());
+        vaft.reset();
+        if (vaft.hasAdTags(AD_PLAYLIST)) {
+            vaft.stripAdSegments(AD_PLAYLIST, false, makeStreamInfo());
         }
     },
     50000

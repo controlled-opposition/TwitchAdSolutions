@@ -32,169 +32,39 @@ function assertDeepEq(actual, expected, message) {
 }
 
 // ============================================================
-// Mock globals
+// Functions under test, loaded from vaft/vaft.user.js
 // ============================================================
-// Narrowed per PR #120 (remove false-positive substrings) + broadened per PR #166
-// (twitch-stitched prefix covers all twitch-stitched-* DATERANGE classes).
-const AdSignifiers = ['stitched-ad', 'EXT-X-CUE-OUT', 'twitch-stitched', 'EXT-X-DATERANGE:CLASS="twitch-maf-ad"'];
-const AdSegmentURLPatterns = ['/adsquared/', '/_404/', '/processing'];
-let AdSegmentCache = new Map();
-let AllSegmentsAreAdSegments = false;
-let V2API = false;
+const { loadVaft } = require('./load-vaft');
 
-const workerStringConflicts = ['twitch', 'isVariantA'];
-const workerStringReinsert = ['isVariantA', 'besuper/', '${patch_url}'];
+const vaft = loadVaft([
+    'hasAdTags',
+    'getMatchedAdSignifiers',
+    'parseAttributes',
+    'getServerTimeFromM3u8',
+    'replaceServerTimeInM3u8',
+    'getStreamUrlForResolution',
+    'stripAdSegments',
+    'createStreamInfo',
+    'workerStringConflicts',
+    'workerStringReinsert',
+    'isValidWorker',
+]);
+const {
+    hasAdTags,
+    getMatchedAdSignifiers,
+    parseAttributes,
+    getServerTimeFromM3u8,
+    replaceServerTimeInM3u8,
+    getStreamUrlForResolution,
+    stripAdSegments,
+    isValidWorker,
+} = vaft;
+// Same Map object the loaded code reads and writes; clear() it between cases.
+const AdSegmentCache = vaft.AdSegmentCache;
 
-// ============================================================
-// Functions under test (copied from vaft.user.js)
-// ============================================================
-
-function hasAdTags(textStr) {
-    return AdSignifiers.some((s) => textStr.includes(s));
-}
-
-function getMatchedAdSignifiers(textStr) {
-    return AdSignifiers.filter((s) => textStr.includes(s));
-}
-
-function parseAttributes(str) {
-    if (!str) return {};
-    if (str.charCodeAt(0) === 35) { // '#'
-        const idx = str.indexOf(':');
-        if (idx !== -1) str = str.slice(idx + 1);
-    }
-    return Object.fromEntries(
-        str.split(/(?:^|,)((?:[^=]*)=(?:"[^"]*"|[^,]*))/)
-        .filter(Boolean)
-        .map(x => {
-            const idx = x.indexOf('=');
-            const key = x.substring(0, idx);
-            const value = x.substring(idx + 1);
-            const num = Number(value);
-            return [key, Number.isNaN(num) ? value.startsWith('"') ? JSON.parse(value) : value : num];
-        }));
-}
-
-function getServerTimeFromM3u8(encodingsM3u8) {
-    if (V2API) {
-        const matches = encodingsM3u8.match(/#EXT-X-SESSION-DATA:DATA-ID="SERVER-TIME",VALUE="([^"]+)"/);
-        return matches && matches.length > 1 ? matches[1] : null;
-    }
-    const matches = encodingsM3u8.match(/SERVER-TIME="([0-9.]+)"/);
-    return matches && matches.length > 1 ? matches[1] : null;
-}
-
-function replaceServerTimeInM3u8(encodingsM3u8, newServerTime) {
-    if (V2API) {
-        return newServerTime ? encodingsM3u8.replace(/(#EXT-X-SESSION-DATA:DATA-ID="SERVER-TIME",VALUE=")[^"]+(")/, `$1${newServerTime}$2`) : encodingsM3u8;
-    }
-    return newServerTime ? encodingsM3u8.replace(/(SERVER-TIME=")[0-9.]+"/, `SERVER-TIME="${newServerTime}"`) : encodingsM3u8;
-}
-
-function getStreamUrlForResolution(encodingsM3u8, resolutionInfo) {
-    const encodingsLines = encodingsM3u8.split(/\r?\n/);
-    const [targetWidth, targetHeight] = resolutionInfo.Resolution.split('x').map(Number);
-    let matchedResolutionUrl = null;
-    let matchedFrameRate = false;
-    let closestResolutionUrl = null;
-    let closestResolutionDifference = Infinity;
-    for (let i = 0; i < encodingsLines.length - 1; i++) {
-        if (encodingsLines[i].startsWith('#EXT-X-STREAM-INF') && encodingsLines[i + 1].includes('.m3u8')) {
-            const attributes = parseAttributes(encodingsLines[i]);
-            const resolution = attributes['RESOLUTION'];
-            const frameRate = attributes['FRAME-RATE'];
-            if (resolution) {
-                if (resolution == resolutionInfo.Resolution && (!matchedResolutionUrl || (!matchedFrameRate && frameRate == resolutionInfo.FrameRate))) {
-                    matchedResolutionUrl = encodingsLines[i + 1];
-                    matchedFrameRate = frameRate == resolutionInfo.FrameRate;
-                    if (matchedFrameRate) {
-                        return matchedResolutionUrl;
-                    }
-                }
-                const [width, height] = resolution.split('x').map(Number);
-                const difference = Math.abs((width * height) - (targetWidth * targetHeight));
-                if (difference < closestResolutionDifference) {
-                    closestResolutionUrl = encodingsLines[i + 1];
-                    closestResolutionDifference = difference;
-                }
-            }
-        }
-    }
-    return closestResolutionUrl;
-}
-
-function stripAdSegments(textStr, stripAllSegments, streamInfo) {
-    let hasStrippedAdSegments = false;
-    let inCueOut = false;
-    const liveSegments = [];
-    const lines = textStr.split(/\r?\n/);
-    const newAdUrl = 'https://twitch.tv';
-    for (let i = 0; i < lines.length; i++) {
-        let line = lines[i];
-        if (line.includes('EXT-X-CUE-OUT')) {
-            inCueOut = true;
-        } else if (line.includes('EXT-X-CUE-IN')) {
-            inCueOut = false;
-        }
-        lines[i] = line
-            .replaceAll(/(X-TV-TWITCH-AD(?:-[A-Z]+)*-URLS?=")[^"]*(")/g, `$1${newAdUrl}$2`);
-        if (i < lines.length - 1 && line.startsWith('#EXTINF') && (!line.includes(',live') || stripAllSegments || AllSegmentsAreAdSegments || inCueOut)) {
-            const segmentUrl = lines[i + 1];
-            if (!AdSegmentCache.has(segmentUrl)) {
-                streamInfo.NumStrippedAdSegments++;
-            }
-            AdSegmentCache.set(segmentUrl, Date.now());
-            hasStrippedAdSegments = true;
-        } else if (i < lines.length - 1 && line.startsWith('#EXTINF') && AdSegmentURLPatterns.some((p) => lines[i + 1].includes(p))) {
-            AdSegmentCache.set(lines[i + 1], Date.now());
-            hasStrippedAdSegments = true;
-            streamInfo.NumStrippedAdSegments++;
-        } else if (i < lines.length - 1 && line.startsWith('#EXTINF') && line.includes(',live')) {
-            liveSegments.push({ extinf: line, url: lines[i + 1] });
-        }
-        if (AdSignifiers.some((s) => line.includes(s))) {
-            hasStrippedAdSegments = true;
-        }
-    }
-    if (hasStrippedAdSegments) {
-        for (let i = 0; i < lines.length; i++) {
-            if (lines[i].startsWith('#EXT-X-TWITCH-PREFETCH:')) {
-                lines[i] = '';
-            }
-        }
-    } else {
-        streamInfo.NumStrippedAdSegments = 0;
-    }
-    if (liveSegments.length > 0) {
-        streamInfo.RecoverySegments = liveSegments.slice(-6);
-        const seq = parseInt((textStr.match(/#EXT-X-MEDIA-SEQUENCE:(\d+)/) || [])[1]);
-        if (!isNaN(seq)) {
-            streamInfo.RecoveryStartSeq = seq + Math.max(0, liveSegments.length - streamInfo.RecoverySegments.length);
-        }
-    }
-    if (hasStrippedAdSegments && liveSegments.length === 0 && streamInfo.RecoverySegments && streamInfo.RecoverySegments.length > 0) {
-        if (streamInfo.RecoveryStartSeq !== undefined) {
-            for (let j = 0; j < lines.length; j++) {
-                if (lines[j].startsWith('#EXT-X-MEDIA-SEQUENCE:')) {
-                    lines[j] = '#EXT-X-MEDIA-SEQUENCE:' + streamInfo.RecoveryStartSeq;
-                    break;
-                }
-            }
-        }
-        for (let j = 0; j < streamInfo.RecoverySegments.length; j++) {
-            lines.push(streamInfo.RecoverySegments[j].extinf);
-            lines.push(streamInfo.RecoverySegments[j].url);
-        }
-    }
-    streamInfo.IsStrippingAdSegments = hasStrippedAdSegments;
-    return lines.join('\n');
-}
-
-function isValidWorker(worker) {
-    const workerString = worker.toString();
-    const hasConflict = workerStringConflicts.some((x) => workerString.includes(x));
-    const hasReinsert = workerStringReinsert.some((x) => workerString.includes(x));
-    return !hasConflict || hasReinsert;
+// A real StreamInfo (full field shape from createStreamInfo) with per-test overrides.
+function makeStreamInfo(overrides = {}) {
+    return Object.assign(vaft.createStreamInfo('testchannel', null, ''), overrides);
 }
 
 // ============================================================
@@ -224,9 +94,9 @@ assertDeepEq(getMatchedAdSignifiers('#EXT-X-DATERANGE:CLASS="twitch-stitched-ad"
 // PR #166 broadened coverage via twitch-stitched prefix (catches future variants like twitch-stitched-mid, twitch-stitched-pod).
 assert(hasAdTags('#EXT-X-DATERANGE:CLASS="twitch-stitched-mid"') === true, 'detects twitch-stitched-mid via prefix');
 assert(hasAdTags('#EXT-X-DATERANGE:CLASS="twitch-stitched-pod"') === true, 'detects twitch-stitched-pod via prefix');
-// Narrowed DATERANGE classes (no longer individually listed — not covered by twitch-stitched prefix either)
+assert(hasAdTags('#EXT-X-DATERANGE:CLASS="twitch-trigger"') === true, 'detects twitch-trigger DATERANGE');
+// Session/source metadata classes (KnownNonAdSignifiers) are not ad markers
 assert(hasAdTags('#EXT-X-DATERANGE:CLASS="twitch-stream-source"') === false, 'twitch-stream-source not a signifier');
-assert(hasAdTags('#EXT-X-DATERANGE:CLASS="twitch-trigger"') === false, 'twitch-trigger not a signifier');
 assert(hasAdTags('#EXT-X-DATERANGE:CLASS="twitch-ad-quartile"') === false, 'twitch-ad-quartile not a signifier');
 
 // ============================================================
@@ -250,28 +120,28 @@ assertEq(attrs2['FRAME-RATE'], 60, 'parses 60fps');
 // Test: getServerTimeFromM3u8
 // ============================================================
 console.log('--- getServerTimeFromM3u8 ---');
-V2API = false;
+vaft.V2API = false;
 assertEq(getServerTimeFromM3u8('#EXT-X-TWITCH-ELAPSED-SECS:10.5,SERVER-TIME="1234567890.123"'), '1234567890.123', 'extracts v1 server time');
 assertEq(getServerTimeFromM3u8('no server time here'), null, 'returns null when no server time');
 
-V2API = true;
+vaft.V2API = true;
 assertEq(getServerTimeFromM3u8('#EXT-X-SESSION-DATA:DATA-ID="SERVER-TIME",VALUE="9876543210.456"'), '9876543210.456', 'extracts v2 server time');
 assertEq(getServerTimeFromM3u8('no server time here'), null, 'returns null for v2 when no match');
-V2API = false;
+vaft.V2API = false;
 
 // ============================================================
 // Test: replaceServerTimeInM3u8
 // ============================================================
 console.log('--- replaceServerTimeInM3u8 ---');
-V2API = false;
+vaft.V2API = false;
 const m3u8WithTime = '#EXT-X-TWITCH-ELAPSED-SECS:10.5,SERVER-TIME="1234567890.123"';
 assert(replaceServerTimeInM3u8(m3u8WithTime, '9999999999.000').includes('SERVER-TIME="9999999999.000"'), 'replaces v1 server time');
 assertEq(replaceServerTimeInM3u8(m3u8WithTime, null), m3u8WithTime, 'returns original when newServerTime is null');
 
-V2API = true;
+vaft.V2API = true;
 const m3u8V2 = '#EXT-X-SESSION-DATA:DATA-ID="SERVER-TIME",VALUE="1234567890.123"';
 assert(replaceServerTimeInM3u8(m3u8V2, '9999999999.000').includes('VALUE="9999999999.000"'), 'replaces v2 server time');
-V2API = false;
+vaft.V2API = false;
 
 // ============================================================
 // Test: getStreamUrlForResolution
@@ -315,7 +185,7 @@ assert(
 console.log('--- stripAdSegments ---');
 
 // Reset cache before each test group
-AdSegmentCache = new Map();
+AdSegmentCache.clear();
 
 // Test: strips ad segments
 const adM3u8 = [
@@ -327,7 +197,7 @@ const adM3u8 = [
     'https://live-segment-1.ts',
 ].join('\n');
 
-let streamInfo = { NumStrippedAdSegments: 0, IsStrippingAdSegments: false, RecoverySegments: [] };
+let streamInfo = makeStreamInfo();
 let result = stripAdSegments(adM3u8, false, streamInfo);
 assertEq(streamInfo.NumStrippedAdSegments, 1, 'counts stripped ad segment');
 assert(streamInfo.IsStrippingAdSegments === true, 'marks as stripping');
@@ -336,7 +206,7 @@ assert(!result.includes('https://prefetch.url'), 'removes prefetch URLs during a
 assert(streamInfo.RecoverySegments.length === 1, 'caches live segment for recovery');
 
 // Test: no stripping on clean m3u8
-AdSegmentCache = new Map();
+AdSegmentCache.clear();
 const cleanM3u8 = [
     '#EXTM3U',
     '#EXTINF:2.000,live',
@@ -345,13 +215,13 @@ const cleanM3u8 = [
     'https://live-segment-2.ts',
 ].join('\n');
 
-streamInfo = { NumStrippedAdSegments: 5, IsStrippingAdSegments: false, RecoverySegments: [] };
+streamInfo = makeStreamInfo({ NumStrippedAdSegments: 5 });
 result = stripAdSegments(cleanM3u8, false, streamInfo);
 assertEq(streamInfo.NumStrippedAdSegments, 0, 'resets stripped count on clean m3u8');
 assert(streamInfo.IsStrippingAdSegments === false, 'not stripping on clean m3u8');
 
 // Test: SCTE-35 CUE-OUT/CUE-IN stripping
-AdSegmentCache = new Map();
+AdSegmentCache.clear();
 const scteM3u8 = [
     '#EXTM3U',
     '#EXT-X-CUE-OUT:DURATION=30',
@@ -362,13 +232,13 @@ const scteM3u8 = [
     'https://normal-segment.ts',
 ].join('\n');
 
-streamInfo = { NumStrippedAdSegments: 0, IsStrippingAdSegments: false, RecoverySegments: [] };
+streamInfo = makeStreamInfo();
 result = stripAdSegments(scteM3u8, false, streamInfo);
 assert(AdSegmentCache.has('https://cue-out-segment.ts'), 'strips segment inside CUE-OUT');
 assert(!AdSegmentCache.has('https://normal-segment.ts'), 'does not strip segment after CUE-IN');
 
 // Test: URL pattern detection
-AdSegmentCache = new Map();
+AdSegmentCache.clear();
 const urlPatternM3u8 = [
     '#EXTM3U',
     '#EXTINF:2.000,live',
@@ -377,13 +247,13 @@ const urlPatternM3u8 = [
     'https://cdn.twitch.tv/normal-segment.ts',
 ].join('\n');
 
-streamInfo = { NumStrippedAdSegments: 0, IsStrippingAdSegments: false, RecoverySegments: [] };
+streamInfo = makeStreamInfo();
 result = stripAdSegments(urlPatternM3u8, false, streamInfo);
 assert(AdSegmentCache.has('https://cdn.twitch.tv/adsquared/ad-123.ts'), 'detects /adsquared/ URL pattern');
 assert(!AdSegmentCache.has('https://cdn.twitch.tv/normal-segment.ts'), 'does not flag normal URL');
 
 // Test: ad tracking URL replacement
-AdSegmentCache = new Map();
+AdSegmentCache.clear();
 const trackingM3u8 = [
     '#EXTM3U',
     '#EXTINF:2.000,stitched-ad',
@@ -395,7 +265,7 @@ const trackingM3u8 = [
     'X-TV-TWITCH-AD-COMMERCIAL-ID="abc123"',
 ].join('\n');
 
-streamInfo = { NumStrippedAdSegments: 0, IsStrippingAdSegments: false, RecoverySegments: [] };
+streamInfo = makeStreamInfo();
 result = stripAdSegments(trackingM3u8, false, streamInfo);
 assert(result.includes('X-TV-TWITCH-AD-URL="https://twitch.tv"'), 'replaces ad URL with twitch.tv');
 assert(result.includes('X-TV-TWITCH-AD-CLICK-TRACKING-URL="https://twitch.tv"'), 'replaces click tracking URL');
@@ -404,7 +274,7 @@ assert(result.includes('X-TV-TWITCH-AD-IMPRESSION-URLS="https://twitch.tv"'), 'r
 assert(result.includes('X-TV-TWITCH-AD-COMMERCIAL-ID="abc123"'), 'leaves non-URL attributes alone');
 
 // Test: recovery segments restore when all stripped
-AdSegmentCache = new Map();
+AdSegmentCache.clear();
 const allAdM3u8 = [
     '#EXTM3U',
     '#EXTINF:2.000,stitched-ad',
@@ -413,20 +283,18 @@ const allAdM3u8 = [
     'https://ad-2.ts',
 ].join('\n');
 
-streamInfo = {
-    NumStrippedAdSegments: 0,
-    IsStrippingAdSegments: false,
+streamInfo = makeStreamInfo({
     RecoverySegments: [
         { extinf: '#EXTINF:2.000,live', url: 'https://recovery-1.ts' },
         { extinf: '#EXTINF:2.000,live', url: 'https://recovery-2.ts' }
     ]
-};
+});
 result = stripAdSegments(allAdM3u8, false, streamInfo);
 assert(result.includes('https://recovery-1.ts'), 'restores recovery segment 1');
 assert(result.includes('https://recovery-2.ts'), 'restores recovery segment 2');
 
 // Test: MEDIA-SEQUENCE is rewritten on recovery injection
-AdSegmentCache = new Map();
+AdSegmentCache.clear();
 const playlistWithSeq = [
     '#EXTM3U',
     '#EXT-X-MEDIA-SEQUENCE:100',
@@ -438,11 +306,11 @@ const playlistWithSeq = [
     'https://s102.ts',
 ].join('\n');
 // Cache phase: all 3 live segments, MEDIA-SEQUENCE=100 → RecoveryStartSeq = 100
-streamInfo = { NumStrippedAdSegments: 0, IsStrippingAdSegments: false, RecoverySegments: [] };
+streamInfo = makeStreamInfo();
 stripAdSegments(playlistWithSeq, false, streamInfo);
 assertEq(streamInfo.RecoveryStartSeq, 100, 'captures RecoveryStartSeq at cache time');
 // Injection phase: ads-only playlist with MEDIA-SEQUENCE=200 → should rewrite to 100
-AdSegmentCache = new Map();
+AdSegmentCache.clear();
 const adOnlyWithSeq = [
     '#EXTM3U',
     '#EXT-X-MEDIA-SEQUENCE:200',
@@ -454,19 +322,19 @@ assert(result.includes('#EXT-X-MEDIA-SEQUENCE:100'), 'rewrites MEDIA-SEQUENCE to
 assert(!result.includes('#EXT-X-MEDIA-SEQUENCE:200'), 'replaces original MEDIA-SEQUENCE');
 
 // Test: stripAllSegments mode
-AdSegmentCache = new Map();
+AdSegmentCache.clear();
 const mixedM3u8 = [
     '#EXTM3U',
     '#EXTINF:2.000,live',
     'https://live-segment.ts',
 ].join('\n');
 
-streamInfo = { NumStrippedAdSegments: 0, IsStrippingAdSegments: false, RecoverySegments: [] };
+streamInfo = makeStreamInfo();
 result = stripAdSegments(mixedM3u8, true, streamInfo);
 assert(AdSegmentCache.has('https://live-segment.ts'), 'strips live segments when stripAllSegments is true');
 
 // Test: /_404/ and /processing URL patterns
-AdSegmentCache = new Map();
+AdSegmentCache.clear();
 const urlPattern404M3u8 = [
     '#EXTM3U',
     '#EXTINF:2.000,live',
@@ -477,14 +345,14 @@ const urlPattern404M3u8 = [
     'https://cdn.twitch.tv/normal-segment.ts',
 ].join('\n');
 
-streamInfo = { NumStrippedAdSegments: 0, IsStrippingAdSegments: false, RecoverySegments: [] };
+streamInfo = makeStreamInfo();
 result = stripAdSegments(urlPattern404M3u8, false, streamInfo);
 assert(AdSegmentCache.has('https://cdn.twitch.tv/_404/placeholder.ts'), 'detects /_404/ URL pattern');
 assert(AdSegmentCache.has('https://cdn.twitch.tv/processing/ad-init.ts'), 'detects /processing URL pattern');
 assert(!AdSegmentCache.has('https://cdn.twitch.tv/normal-segment.ts'), 'does not flag normal segment');
 
 // Test: multiple signifiers in same m3u8
-AdSegmentCache = new Map();
+AdSegmentCache.clear();
 const multiSignifierM3u8 = [
     '#EXTM3U',
     '#EXT-X-CUE-OUT:DURATION=30',
@@ -496,23 +364,23 @@ const multiSignifierM3u8 = [
     'https://live-1.ts',
 ].join('\n');
 
-streamInfo = { NumStrippedAdSegments: 0, IsStrippingAdSegments: false, RecoverySegments: [] };
+streamInfo = makeStreamInfo();
 result = stripAdSegments(multiSignifierM3u8, false, streamInfo);
 assert(streamInfo.IsStrippingAdSegments === true, 'detects ads with multiple signifiers');
 assert(AdSegmentCache.has('https://ad-1.ts'), 'strips segment with multiple signifiers present');
 
 // Test: AdSegmentCache deduplication
-AdSegmentCache = new Map();
+AdSegmentCache.clear();
 const dupeM3u8 = [
     '#EXTM3U',
     '#EXTINF:2.000,stitched-ad',
     'https://same-ad.ts',
 ].join('\n');
 
-streamInfo = { NumStrippedAdSegments: 0, IsStrippingAdSegments: false, RecoverySegments: [] };
+streamInfo = makeStreamInfo();
 stripAdSegments(dupeM3u8, false, streamInfo);
 assertEq(streamInfo.NumStrippedAdSegments, 1, 'first strip increments count');
-streamInfo2 = { NumStrippedAdSegments: 0, IsStrippingAdSegments: false, RecoverySegments: [] };
+const streamInfo2 = makeStreamInfo();
 stripAdSegments(dupeM3u8, false, streamInfo2);
 assertEq(streamInfo2.NumStrippedAdSegments, 0, 'duplicate URL does not increment count (already cached)');
 
@@ -531,15 +399,11 @@ assert(isValidWorker({ toString: () => 'function Worker() { ${patch_url} }' }) =
 // Test: AdSegmentCache TTL cleanup
 // ============================================================
 console.log('--- AdSegmentCache TTL ---');
-AdSegmentCache = new Map();
+AdSegmentCache.clear();
 AdSegmentCache.set('old-segment.ts', Date.now() - 130000);
 AdSegmentCache.set('new-segment.ts', Date.now());
-const now = Date.now();
-AdSegmentCache.forEach((value, key, map) => {
-    if (value < now - 120000) {
-        map.delete(key);
-    }
-});
+// A fresh StreamInfo has no LastAdCachePruneAt, so this call runs the throttled prune.
+stripAdSegments(cleanM3u8, false, makeStreamInfo());
 assert(!AdSegmentCache.has('old-segment.ts'), 'removes segments older than 120s');
 assert(AdSegmentCache.has('new-segment.ts'), 'keeps recent segments');
 
@@ -563,12 +427,12 @@ assertEq(getStreamUrlForResolution('', { Resolution: '1920x1080', FrameRate: 30 
 // Test: getServerTimeFromM3u8 — edge cases
 // ============================================================
 console.log('--- getServerTimeFromM3u8 (edge cases) ---');
-V2API = false;
+vaft.V2API = false;
 assertEq(getServerTimeFromM3u8('SERVER-TIME=""'), null, 'returns null for empty server time');
 assertEq(getServerTimeFromM3u8('SERVER-TIME="abc"'), null, 'returns null for non-numeric v1 time');
-V2API = true;
+vaft.V2API = true;
 assertEq(getServerTimeFromM3u8('#EXT-X-SESSION-DATA:DATA-ID="OTHER",VALUE="123"'), null, 'returns null for wrong DATA-ID');
-V2API = false;
+vaft.V2API = false;
 
 // ============================================================
 // Test: parseAttributes — edge cases
@@ -576,6 +440,25 @@ V2API = false;
 console.log('--- parseAttributes (edge cases) ---');
 const attrsEmpty = parseAttributes('');
 assert(typeof attrsEmpty === 'object', 'returns object for empty string');
+
+// ============================================================
+// Test: worker blob functions load on their own
+// ============================================================
+// hookWindowWorker() pastes these functions into the worker with .toString(). Read the list
+// from the template itself so newly serialized functions are covered automatically.
+console.log('--- worker blob functions ---');
+{
+    const fs = require('fs');
+    const { SCRIPT_PATH } = require('./load-vaft');
+    const serialized = [...fs.readFileSync(SCRIPT_PATH, 'utf8').matchAll(/\$\{(\w+)\.toString\(\)\}/g)].map((m) => m[1]);
+    assert(serialized.length >= 10, 'found the serialized function list in the worker template (' + serialized.length + ')');
+    let worker = null;
+    try { worker = loadVaft(serialized); } catch (e) { console.error(e); }
+    assert(worker !== null, 'all serialized functions load together in a fresh context');
+    for (const name of serialized) {
+        assert(worker && typeof worker[name] === 'function', name + ' is defined after loading');
+    }
+}
 
 // ============================================================
 // Results

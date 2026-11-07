@@ -48,10 +48,13 @@
           default = pkgs.mkShell {
             packages = [
               pkgs.nodejs
+              pkgs.typescript
               self.packages.${system}.acorn
             ];
+            # tests/load-vaft.js does require('acorn').
+            NODE_PATH = "${self.packages.${system}.acorn}/lib/node_modules";
             shellHook = ''
-              echo "vaft dev shell — validate: acorn --ecma2022 vaft/vaft.user.js >/dev/null · test: node tests/test.js"
+              echo "vaft dev shell — syntax: acorn --ecma2022 vaft/vaft.user.js >/dev/null · types: tsc -p . · tests: node tests/test.js"
             '';
           };
         }
