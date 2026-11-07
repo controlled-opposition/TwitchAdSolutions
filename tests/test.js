@@ -64,7 +64,7 @@ const AdSegmentCache = vaft.AdSegmentCache;
 
 // A real StreamInfo (full field shape from createStreamInfo) with per-test overrides.
 function makeStreamInfo(overrides = {}) {
-    return Object.assign(vaft.createStreamInfo('testchannel', null, ''), overrides);
+    return Object.assign(vaft.createStreamInfo('testchannel', '', ''), overrides);
 }
 
 // ============================================================
@@ -461,7 +461,109 @@ console.log('--- worker blob functions ---');
 }
 
 // ============================================================
+// Test: worker master-playlist hook (hookWorkerFetch)
+// ============================================================
+// Async cases run in order before the results are printed (see the end of the file).
+const asyncTests = [];
+// An unhandled rejection from the loaded code is a failure, not a crash of the test run.
+process.on('unhandledRejection', (e) => { failed++; console.error('FAIL: unhandled rejection: ' + (e && e.message)); });
+
+// Runs one master-playlist request through the worker fetch hook with a mocked network.
+// Resolves to 'resolved' or 'hung' (no answer within 500ms).
+function workerMasterFetch(worker, url) {
+    return Promise.race([
+        worker.fetch(url).then(() => 'resolved', () => 'rejected'),
+        new Promise((resolve) => setTimeout(() => resolve('hung'), 500)),
+    ]);
+}
+function makeWorkerContext(network) {
+    const worker = loadVaft(
+        ['hookWorkerFetch', 'getServerTimeFromM3u8', 'replaceServerTimeInM3u8', 'parseAttributes', 'videoCodecFamily', 'createStreamInfo', 'processM3U8', 'hasAdTags', 'getMatchedAdSignifiers', 'stripAdSegments', 'notifyAdComplete', 'getStreamUrlForResolution', 'gqlRequest', 'getAccessToken'],
+        { globals: { Response, Blob, URL, atob, Uint8Array, setTimeout, clearTimeout, fetch: network } },
+    );
+    worker.hookWorkerFetch();
+    return worker;
+}
+const masterUrl = 'https://usher.ttvnw.net/api/v2/channel/hls/testchan.m3u8?sig=1';
+// v2-style master playlist: variant lines are raw CDN URLs without '.m3u8'.
+const v2Encodings = [
+    '#EXTM3U',
+    '#EXT-X-STREAM-INF:BANDWIDTH=6000000,RESOLUTION=1920x1080,CODECS="avc1.4D4028",FRAME-RATE=30.000',
+    'https://video-edge.example.net/v1/segment/chunked/abc',
+].join('\n');
+
+asyncTests.push(async () => {
+    console.log('--- hookWorkerFetch: cached-session probe ---');
+    const requested = [];
+    const worker = makeWorkerContext(async (input) => {
+        if (typeof input !== 'string') throw new TypeError('Failed to parse URL from ' + input);// like a real fetch(undefined) in a blob worker
+        requested.push(input);
+        return new Response(input === masterUrl ? v2Encodings : '#EXTM3U', { status: 200 });
+    });
+    assertEq(await workerMasterFetch(worker, masterUrl), 'resolved', 'first master playlist request resolves');
+    assertEq(await workerMasterFetch(worker, masterUrl), 'resolved', 'repeat request with a v2 cache (no .m3u8 variant line) resolves instead of hanging');
+    assert(requested.includes('https://video-edge.example.net/v1/segment/chunked/abc'), 'v2 cache is probed through its raw CDN variant URL');
+    assert(worker.StreamInfos.testchan !== undefined, 'stream session exists after the repeat request');
+});
+
+asyncTests.push(async () => {
+    const worker = makeWorkerContext(async (input) => {
+        if (input !== masterUrl) throw new TypeError('network error');
+        return new Response(v2Encodings, { status: 200 });
+    });
+    await workerMasterFetch(worker, masterUrl);
+    const first = worker.StreamInfos.testchan;
+    assertEq(await workerMasterFetch(worker, masterUrl), 'resolved', 'repeat request still resolves when the cache probe rejects');
+    assert(worker.StreamInfos.testchan !== first, 'a rejected probe rebuilds the stream session');
+});
+
+// ============================================================
+// Test: worker GQL request headers (gqlRequest)
+// ============================================================
+asyncTests.push(async () => {
+    console.log('--- gqlRequest headers ---');
+    const posted = [];
+    const worker = loadVaft(['gqlRequest'], { globals: { setTimeout, clearTimeout, postMessage: (m) => posted.push(m) } });
+    worker.pendingFetchRequests = new Map();
+    worker.GQLDeviceID = 'device123';
+    worker.AuthorizationHeader = undefined;
+    worker.gqlRequest({ operationName: 'Test' }).catch(() => {});
+    worker.AuthorizationHeader = 'OAuth abc';
+    worker.gqlRequest({ operationName: 'Test' }).catch(() => {});
+    const [loggedOut, loggedIn] = posted.map((m) => m.value.options.headers);
+    assert(!('Authorization' in loggedOut), 'no Authorization header when logged out (was the literal "undefined")');
+    assertEq(loggedIn.Authorization, 'OAuth abc', 'Authorization header sent when logged in');
+    assertEq(loggedOut['X-Device-Id'], 'device123', 'device id header sent');
+    for (const { timeoutId } of worker.pendingFetchRequests.values()) clearTimeout(timeoutId);
+});
+
+// ============================================================
+// Test: page fetch hook (hookFetch)
+// ============================================================
+asyncTests.push(async () => {
+    console.log('--- hookFetch ---');
+    const calls = [];
+    const page = loadVaft(
+        ['hookFetch', 'maskAsNative', 'postTwitchWorkerMessage', 'twitchWorkers', 'countCsaiRequest', 'csaiRequestCounts', 'playerBufferState'],
+        { globals: { fetch: async (...args) => { calls.push(args); return 'ok'; } } },
+    );
+    page.hookFetch();
+    let threw = null;
+    try { await page.fetch('https://gql.twitch.tv/gql'); } catch (e) { threw = e; }
+    assertEq(threw, null, 'GQL fetch without an init object does not throw in the hook');
+    assertEq(calls.length, 1, 'request is passed through to the real fetch');
+    await page.fetch('https://gql.twitch.tv/gql', { headers: { 'Client-Version': 'v1', 'X-Device-Id': 'dev1' }, body: '{}' });
+    assertEq(page.ClientVersion, 'v1', 'captures Client-Version from GQL request headers');
+    assertEq(page.GQLDeviceID, 'dev1', 'captures X-Device-Id from GQL request headers');
+});
+
+// ============================================================
 // Results
 // ============================================================
-console.log('\n' + passed + ' passed, ' + failed + ' failed');
-process.exit(failed > 0 ? 1 : 0);
+(async () => {
+    for (const run of asyncTests) {
+        try { await run(); } catch (e) { failed++; console.error('FAIL: async test threw', e); }
+    }
+    console.log('\n' + passed + ' passed, ' + failed + ' failed');
+    process.exit(failed > 0 ? 1 : 0);
+})();

@@ -78,7 +78,8 @@ GitHub Actions runs the first three on push/PR.
 - `types/vaft.d.ts` holds the declarations: every `declareOptions()` global, `StreamInfo`/`ResolutionInfo`, the worker⇄page message unions (`WorkerToPageMessage`, `PageToWorkerValues`), and `Window` additions. Adding a `scope.X` in `declareOptions()` or a field in `createStreamInfo()` means adding it there too.
 - Annotate functions with JSDoc (`@param`, `@returns`). Worker `postMessage(...)` calls wrap the literal in `/** @satisfies {WorkerToPageMessage} */ (...)` because the global `postMessage` signature accepts anything.
 - Per-function state on worker-serialized functions lives in function properties (`notifyAdComplete.loggedNoMatch`), not outer variables (which don't exist in the worker). Declare each one with a falsy default right after the function so the checker knows it.
-- Strict mode is off. Remaining cost to enable: `strictNullChecks` ~106 errors, `noImplicitAny` ~138.
+- `strict` is on. Twitch internals reached through React (`TwitchMediaPlayer`, `TwitchPlayerState`, `ReactFiber`) are typed with only the members vaft uses, all optional where Twitch may drop them; `findReactNode` returns `any` deliberately.
+- Behaviour-neutral casts used where the checker can't follow the code: `/** @type {Error} */ (err).message` in catch blocks, `/** @type {any} */ (arguments)` when forwarding to the real `fetch`/`setItem`/`open`. Don't "fix" these by changing runtime behaviour.
 
 ## Backup Player Types
 

@@ -49,7 +49,9 @@ function indexDeclarations(ast) {
 
 /**
  * @param {string[]} names top-level function or variable names to load
- * @param {{ console?: object }} [options] console used by the loaded code (silent by default)
+ * @param {{ console?: object, globals?: object }} [options] console used by the loaded code
+ *   (silent by default); extra globals (fetch, Response, ...) to provide. `self` and `window`
+ *   always point at the context itself, as in the worker / page.
  * @returns {object} vm context holding the loaded functions and declareOptions() globals
  */
 function loadVaft(names, options = {}) {
@@ -74,7 +76,9 @@ function loadVaft(names, options = {}) {
         return 'var ' + source.slice(declarator.start, declarator.end) + ';';
     };
 
-    const context = vm.createContext({ console: options.console || quietConsole });
+    const context = vm.createContext({ console: options.console || quietConsole, ...(options.globals || {}) });
+    context.self = context;
+    context.window = context;
     const wanted = ['declareOptions', ...names.filter((n) => n !== 'declareOptions')];
     vm.runInContext(wanted.map(pick).join('\n'), context, { filename: SCRIPT_PATH });
     vm.runInContext('declareOptions(globalThis);', context);

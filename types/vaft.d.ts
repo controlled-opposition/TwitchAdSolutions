@@ -120,7 +120,7 @@ interface StreamInfo {
     // Identity / lifecycle
     ChannelName: string;
     LastSeenAt: number;
-    EncodingsM3U8: string | null;
+    EncodingsM3U8: string;
     UsherParams: string;
     // Resolutions / URL map
     Urls: Record<string, ResolutionInfo>;
@@ -155,7 +155,8 @@ interface StreamInfo {
     LastCleanNativeM3U8: string | null;
     LastCleanNativePlaylistAt: number;
     // Backup player type cycling
-    BackupEncodingsM3U8Cache: Record<string, string> | string[];
+    /** Player type -> encodings m3u8 fetched for it this break (null once used). */
+    BackupEncodingsM3U8Cache: Record<string, string | null>;
     ActiveBackupPlayerType: PlayerType | null;
     PinnedBackupPlayerType: PlayerType | null;
     LastCommittedBackupPlayerType: PlayerType | null;
@@ -211,7 +212,7 @@ interface AdBlockBannerMessage {
 interface WorkerFetchRequest {
     id: string;
     url: string;
-    options: RequestInit & { headers: Record<string, string | undefined> };
+    options: RequestInit & { headers: Record<string, string> };
 }
 
 /** The page's answer to a WorkerFetchRequest. */
@@ -266,6 +267,97 @@ type PageToWorkerMessage = {
 // ---------------------------------------------------------------------------
 // Page globals
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Page-side state (monitorPlayerBuffering and friends)
+// ---------------------------------------------------------------------------
+
+/** Buffer-monitor state shared by monitorPlayerBuffering(), doTwitchPlayerTask() and the worker message handler. */
+interface PlayerBufferState {
+    channelName: string | null;
+    hasStreamStarted: boolean;
+    position: number;
+    bufferedPosition: number;
+    bufferDuration: number;
+    numSame: number;
+    fixAttempts: number;
+    lastFixTime: number;
+    isLive: boolean;
+    lastBackupSwitchAt: number;
+    lastReloadAt: number;
+    recoveryReloadUsed: boolean;
+    userPauseIntent: boolean;
+    loggedPauseIntent: boolean;
+    /** Time of our last pause/play or reload (ms); 0 when none is pending. */
+    weJustPaused: number;
+    inAdBreak: boolean;
+    vaftEverUnmuted: boolean;
+    // Set lazily by the monitor. Left unset on purpose: videoCurrentTime is checked with `=== undefined`.
+    videoElement?: HTMLVideoElement | null;
+    videoCurrentTime?: number;
+    lastDriftStartedAt?: number;
+    hasHadData?: boolean;
+    adStallStartAt?: number;
+    lastAdStallReloadAt?: number;
+    // Post-break video-wedge watch
+    wedgePrevInAdBreak?: boolean;
+    wedgeEvalsRemaining?: number;
+    wedgeLastTime?: number;
+    wedgeLastFrames?: number;
+    wedgeEvidence?: number;
+    wedgeHealthy?: number;
+    wedgeActions?: number;
+}
+
+// ---------------------------------------------------------------------------
+// Twitch internals reached through React (getPlayerAndState). Undocumented and liable to
+// change without notice, so everything vaft reads is optional and only what it uses is listed.
+// ---------------------------------------------------------------------------
+
+/** A React fiber node. */
+interface ReactFiber {
+    stateNode?: any;
+    child?: ReactFiber | null;
+    sibling?: ReactFiber | null;
+}
+
+/** The #root element, carrying React's internal container properties. */
+type ReactRootElement = Element & {
+    _reactRootContainer?: { _internalRoot?: { current?: ReactFiber } };
+    [key: string]: any;
+};
+
+/** Twitch's (IVS) media player instance. */
+interface TwitchMediaPlayer {
+    core?: {
+        paused?: boolean;
+        state?: {
+            path?: string;
+            position?: number;
+            bufferedPosition?: number;
+            muted?: boolean;
+            volume?: number | string;
+            quality?: { group?: string };
+        };
+    };
+    getHTMLVideoElement(): HTMLVideoElement | null | undefined;
+    getBufferDuration(): number;
+    getState(): string;
+    isPaused(): boolean;
+    play(): Promise<void> | undefined;
+    pause(): void;
+}
+
+/** Twitch's player-state component: owns setSrc() and the content metadata. */
+interface TwitchPlayerState {
+    setSrc(options: { isNewMediaPlayerInstance: boolean; refreshAccessToken: boolean }): void;
+    props?: { content?: { type?: string } };
+}
+
+interface HTMLVideoElement {
+    /** Set once monitorPlayerBuffering() has attached its pause/play intent listeners. */
+    __tasIntentHooked?: boolean;
+}
 
 interface Function {
     /** Set on URL.revokeObjectURL once hookWindowWorker() has wrapped it, so it's wrapped only once. */

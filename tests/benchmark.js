@@ -206,7 +206,7 @@ function compare(label, pixeltrisFn, vaftFn, iterations) {
 }
 
 function makeStreamInfo() {
-    return vaftContext.createStreamInfo('benchchannel', null, '');
+    return vaftContext.createStreamInfo('benchchannel', '', '');
 }
 
 // ============================================================
