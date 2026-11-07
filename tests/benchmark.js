@@ -4,7 +4,7 @@
 // Measures CPU time and memory for the hot-path functions that run
 // on every m3u8 playlist fetch (~every 2s per stream).
 
-const { performance } = require('perf_hooks');
+const { performance } = require('node:perf_hooks');
 
 // ============================================================
 // Test payloads — realistic m3u8 content
@@ -69,18 +69,6 @@ https://video-edge-abc.fra02.abs.hls.ttvnw.net/v1/segment/CpUE_seg48204.ts
 #EXTINF:2.000,live
 https://video-edge-abc.fra02.abs.hls.ttvnw.net/v1/segment/CpUE_seg48205.ts`;
 
-const ENCODINGS_M3U8 = `#EXTM3U
-#EXT-X-STREAM-INF:BANDWIDTH=6000000,CODECS="avc1.64002A",RESOLUTION=1920x1080,FRAME-RATE=60.000
-https://video-weaver.fra02.hls.ttvnw.net/v1/playlist/source.m3u8
-#EXT-X-STREAM-INF:BANDWIDTH=3000000,CODECS="avc1.4D401F",RESOLUTION=1280x720,FRAME-RATE=30.000
-https://video-weaver.fra02.hls.ttvnw.net/v1/playlist/720p.m3u8
-#EXT-X-STREAM-INF:BANDWIDTH=1500000,CODECS="avc1.4D401E",RESOLUTION=852x480,FRAME-RATE=30.000
-https://video-weaver.fra02.hls.ttvnw.net/v1/playlist/480p.m3u8
-#EXT-X-STREAM-INF:BANDWIDTH=700000,CODECS="avc1.4D4015",RESOLUTION=640x360,FRAME-RATE=30.000
-https://video-weaver.fra02.hls.ttvnw.net/v1/playlist/360p.m3u8
-#EXT-X-STREAM-INF:BANDWIDTH=400000,CODECS="avc1.4D400C",RESOLUTION=284x160,FRAME-RATE=30.000
-https://video-weaver.fra02.hls.ttvnw.net/v1/playlist/160p.m3u8`;
-
 const PARSE_ATTR_INPUT = 'BANDWIDTH=6000000,CODECS="avc1.64002A",RESOLUTION=1920x1080,FRAME-RATE=60.000';
 const PARSE_ATTR_TAG = '#EXT-X-STREAM-INF:BANDWIDTH=6000000,CODECS="avc1.64002A",RESOLUTION=1920x1080,FRAME-RATE=60.000';
 
@@ -91,7 +79,7 @@ const PARSE_ATTR_TAG = '#EXT-X-STREAM-INF:BANDWIDTH=6000000,CODECS="avc1.64002A"
 const pixeltris = (() => {
     const AdSignifier = 'stitched';
     const AdSegmentCache = new Map();
-    let AllSegmentsAreAdSegments = false;
+    const AllSegmentsAreAdSegments = false;
 
     function hasAdTags(textStr) {
         return textStr.includes(AdSignifier);
@@ -196,7 +184,6 @@ function compare(label, pixeltrisFn, vaftFn, iterations) {
     const p = bench('pixeltris', pixeltrisFn, iterations);
     const r = bench('vaft', vaftFn, iterations);
     const ratio = (p.elapsed / r.elapsed).toFixed(2);
-    const winner = ratio > 1 ? 'vaft' : ratio < 1 ? 'pixeltris' : 'tie';
     const speedup = ratio > 1 ? ratio + 'x faster' : (1/ratio).toFixed(2) + 'x slower';
 
     console.log(`\n--- ${label} (${p.iterations} iterations) ---`);

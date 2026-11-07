@@ -248,7 +248,11 @@
      */
     function countCsaiRequest(csaiType, transport) {
         const inBreak = playerBufferState.inAdBreak === true;
-        const c = csaiRequestCounts[csaiType] || (csaiRequestCounts[csaiType] = { inBreak: 0, noBreak: 0 });
+        let c = csaiRequestCounts[csaiType];
+        if (!c) {
+            c = { inBreak: 0, noBreak: 0 };
+            csaiRequestCounts[csaiType] = c;
+        }
         const n = inBreak ? ++c.inBreak : ++c.noBreak;
         // First, then every 10th. Both totals and the channel ride on every line so a dump
         // spanning several channels reads as a ratio without the whole session in hand.
@@ -281,6 +285,7 @@
     const workerStringReinsert = [
         'isVariantA',// TwitchNoSub (prior to (0.9))
         'besuper/',// TwitchNoSub (0.9)
+        // biome-ignore lint/suspicious/noTemplateCurlyInString: literal marker string from TwitchNoSub's worker source
         '${patch_url}'// TwitchNoSub (0.9.1)
     ];
     // Walk the Worker prototype chain and remove conflicting overrides
@@ -532,7 +537,7 @@
                 twitchWorkers.length = 0;
                 twitchWorkers.push(this);
                 this.addEventListener('message', (/** @type {MessageEvent<WorkerToPageMessage>} */ e) => {
-                    if (e.data.key == 'UpdateAdBlockBanner') {
+                    if (e.data.key === 'UpdateAdBlockBanner') {
                         updateAdblockBanner(e.data);
                         // Track backup stream switches (start and end of ad break)
                         if (e.data.hasAds !== !!playerBufferState.inAdBreak) {
@@ -549,14 +554,14 @@
                             if (driftCatchUpTimeout) { clearTimeout(driftCatchUpTimeout); driftCatchUpTimeout = null; }
                             try { const v = getPlayerVideoElement(); if (v) v.playbackRate = 1.0; } catch {}
                         }
-                    } else if (e.data.key == 'PauseResumePlayer') {
+                    } else if (e.data.key === 'PauseResumePlayer') {
                         doTwitchPlayerTask(true, false);
-                    } else if (e.data.key == 'ReloadPlayer') {
+                    } else if (e.data.key === 'ReloadPlayer') {
                         doTwitchPlayerTask(false, true, e.data.kind);
                     }
                 });
                 this.addEventListener('message', async (/** @type {MessageEvent<WorkerToPageMessage>} */ event) => {
-                    if (event.data.key == 'FetchRequest') {
+                    if (event.data.key === 'FetchRequest') {
                         const fetchRequest = event.data.value;
                         const responseData = await handleWorkerFetchRequest(fetchRequest);
                         this.postMessage({
@@ -601,8 +606,12 @@
      * @returns {string}
      */
     function getWasmWorkerJs(twitchBlobUrl) {
-        /** @type {Record<string, string>} */
-        const cache = getWasmWorkerJs.cache || (getWasmWorkerJs.cache = Object.create(null));
+        /** @type {Record<string, string> | undefined} */
+        let cache = getWasmWorkerJs.cache;
+        if (!cache) {
+            cache = /** @type {Record<string, string>} */ (Object.create(null));
+            getWasmWorkerJs.cache = cache;
+        }
         if (cache[twitchBlobUrl]) {
             return cache[twitchBlobUrl];
         }
@@ -651,7 +660,7 @@
                     V2API = url.includes('/api/v2/');
                     const parsedUrl = new URL(url);
                     // Twitch HLS master URLs always end in <channel>.m3u8.
-                    const channelName = /** @type {string} */ (parsedUrl.pathname.match(/([^\/]+)(?=\.\w+$)/)?.[0]);
+                    const channelName = /** @type {string} */ (parsedUrl.pathname.match(/([^/]+)(?=\.\w+$)/)?.[0]);
                     if (ForceAccessTokenPlayerType) {
                         // parent_domains is used to determine if the player is embeded and stripping it gets rid of fake ads
                         parsedUrl.searchParams.delete('parent_domains');
@@ -659,7 +668,7 @@
                     }
                     return new Promise(function(resolve, reject) {
                         const processAfter = async function(/** @type {Response} */ response) {
-                            if (response.status == 200) {
+                            if (response.status === 200) {
                                 const encodingsM3u8 = await response.text();
                                 const serverTime = getServerTimeFromM3u8(encodingsM3u8);
                                 /** @type {StreamInfo | null} */
@@ -1019,13 +1028,10 @@
         // Log potential ad markers that aren't in AdSignifiers (candidates for future inclusion)
         if (!streamInfo.HasLoggedUnknownSignifiers) {
             const candidates = new Set();
-            let sm;
-            const classRe = /EXT-X-DATERANGE:[^\n]*CLASS="(twitch-[^"]+)"/g;
-            while ((sm = classRe.exec(textStr)) !== null) {
+            for (const sm of textStr.matchAll(/EXT-X-DATERANGE:[^\n]*CLASS="(twitch-[^"]+)"/g)) {
                 candidates.add('EXT-X-DATERANGE:CLASS="' + sm[1] + '"');
             }
-            const tagRe = /(SCTE35-[A-Z-]+|EXT-X-CUE-[A-Z-]+)/g;
-            while ((sm = tagRe.exec(textStr)) !== null) {
+            for (const sm of textStr.matchAll(/(SCTE35-[A-Z-]+|EXT-X-CUE-[A-Z-]+)/g)) {
                 candidates.add(sm[1]);
             }
             // Substring check (not exact): a candidate is "known" if any AdSignifier
@@ -1041,7 +1047,7 @@
             }
         }
         for (let i = 0; i < lines.length; i++) {
-            let line = lines[i];
+            const line = lines[i];
             // Track SCTE-35 CUE-OUT/CUE-IN ad boundaries
             if (line.includes('EXT-X-CUE-OUT')) {
                 if (!inCueOut) {
@@ -1128,8 +1134,8 @@
         // so the player accepts injected recovery segments as the correct position in the stream)
         if (liveSegments.length > 0) {
             streamInfo.RecoverySegments = liveSegments.slice(-6);
-            const seq = parseInt((textStr.match(/#EXT-X-MEDIA-SEQUENCE:(\d+)/) || [])[1]);
-            if (!isNaN(seq)) {
+            const seq = parseInt((textStr.match(/#EXT-X-MEDIA-SEQUENCE:(\d+)/) || [])[1], 10);
+            if (!Number.isNaN(seq)) {
                 streamInfo.RecoveryStartSeq = seq + Math.max(0, liveSegments.length - streamInfo.RecoverySegments.length);
             }
         }
@@ -1252,9 +1258,9 @@
                 const resolution = attributes['RESOLUTION'];
                 const frameRate = attributes['FRAME-RATE'];
                 if (resolution) {
-                    if (resolution == resolutionInfo.Resolution && (!matchedResolutionUrl || (!matchedFrameRate && frameRate == resolutionInfo.FrameRate))) {
+                    if (resolution === resolutionInfo.Resolution && (!matchedResolutionUrl || (!matchedFrameRate && frameRate === resolutionInfo.FrameRate))) {
                         matchedResolutionUrl = encodingsLines[i + 1];
-                        matchedFrameRate = frameRate == resolutionInfo.FrameRate;
+                        matchedFrameRate = frameRate === resolutionInfo.FrameRate;
                         if (matchedFrameRate) {
                             return matchedResolutionUrl;
                         }
@@ -1598,7 +1604,7 @@
                 if (failedAt && (Date.now() - failedAt) < 5000) {
                     continue;
                 }
-                const isFullyCachedPlayerType = playerType != realPlayerType;
+                const isFullyCachedPlayerType = playerType !== realPlayerType;
                 for (let i = 0; i < 2; i++) {
                     // This caches the m3u8 if it doesn't have ads. If the already existing cache has ads it fetches a new version (second loop)
                     let isFreshM3u8 = false;
@@ -1667,13 +1673,13 @@
                                 throw new Error('no variant playlist in the backup encodings');
                             }
                             const streamM3u8Response = await realFetch(streamM3u8Url);
-                            if (streamM3u8Response.status == 200) {
+                            if (streamM3u8Response.status === 200) {
                                 const m3u8Text = await streamM3u8Response.text();
                                 if (m3u8Text) {
-                                    if (playerType == FallbackPlayerType) {
+                                    if (playerType === FallbackPlayerType) {
                                         fallbackM3u8 = m3u8Text;
                                     }
-                                    if ((!hasAdTags(m3u8Text) && (SimulatedAdsDepth == 0 || playerTypeIndex >= SimulatedAdsDepth - 1)) || (!fallbackM3u8 && playerTypeIndex >= playerTypesToTry.length - 1)) {
+                                    if ((!hasAdTags(m3u8Text) && (SimulatedAdsDepth === 0 || playerTypeIndex >= SimulatedAdsDepth - 1)) || (!fallbackM3u8 && playerTypeIndex >= playerTypesToTry.length - 1)) {
                                         if ((streamInfo.ConsecutiveAllStrippedPolls || 0) >= 1 && !hasAdTags(m3u8Text)) {
                                             const prevType = streamInfo.LastCommittedBackupPlayerType;
                                             if (prevType && prevType !== playerType) {
@@ -1754,7 +1760,7 @@
             if (backupM3u8 && backupPlayerType && streamInfo.IsShowingAd) {
                 textStr = backupM3u8;
                 streamInfo.LastCommittedBackupPlayerType = backupPlayerType;
-                if (streamInfo.ActiveBackupPlayerType != backupPlayerType) {
+                if (streamInfo.ActiveBackupPlayerType !== backupPlayerType) {
                     streamInfo.ActiveBackupPlayerType = backupPlayerType;
                     const sourceQualityTypes = ['embed', 'site', 'popout'];
                     // Never pin 'autoplay'. PreferLowQualityBackup keeps autoplay as the LAST
@@ -2037,7 +2043,7 @@
                 isVod: false,
                 vodID: "",
                 playerType: playerType,
-                platform: playerType == 'autoplay' ? 'android' : 'web'
+                platform: playerType === 'autoplay' ? 'android' : 'web'
             },
             extensions: {
                 persistedQuery: {
@@ -2062,7 +2068,7 @@
                 GQLDeviceID += dcharacters.charAt(Math.floor(Math.random() * dcharactersLength));
             }
         }
-        let headers = {
+        const headers = {
             'Client-ID': ClientID,
             'X-Device-Id': GQLDeviceID,
             // Omitted when logged out: an undefined value would go out as the literal header "Authorization: undefined".
@@ -2193,7 +2199,7 @@
                       const fileName = m3u8Url.substring(lastSlash + 1, queryStart !== -1 ? queryStart : undefined);
                       if (fileName?.endsWith('.m3u8')) {
                           const channelName = fileName.slice(0, -5);
-                          if (playerBufferState.channelName != channelName) {
+                          if (playerBufferState.channelName !== channelName) {
                               playerBufferState.channelName = channelName;
                               playerBufferState.hasStreamStarted = false;
                               playerBufferState.numSame = 0;
@@ -2252,7 +2258,7 @@
                         // is playing fine and we should not "fix" anything — the false-fires
                         // were causing user-visible 8s-cadence abrupts on low-latency / post-
                         // quality-change states.
-                        const positionFrozen = (playerBufferState.position == position) &&
+                        const positionFrozen = (playerBufferState.position === position) &&
                             (playerBufferState.videoCurrentTime === undefined || playerBufferState.videoCurrentTime === videoCurrentTime);
                         if (playerNotActivelyPlaying) {
                             // Skip — neither increment nor reset, just hold state.
@@ -2266,12 +2272,12 @@
                             // AND, real stalls (frozen + buffer drained below DangerZone) still fire on the
                             // same poll cadence; healthy thin-buffer feeds no longer trip it.
                             (positionFrozen && bufferDuration < PlayerBufferingDangerZone)  &&
-                            playerBufferState.bufferedPosition == bufferedPosition &&
+                            playerBufferState.bufferedPosition === bufferedPosition &&
                             playerBufferState.bufferDuration >= bufferDuration &&
-                            (position != 0 || bufferedPosition != 0 || bufferDuration != 0)
+                            (position !== 0 || bufferedPosition !== 0 || bufferDuration !== 0)
                         ) {
                             playerBufferState.numSame++;
-                            if (playerBufferState.numSame == PlayerBufferingSameStateCount) {
+                            if (playerBufferState.numSame === PlayerBufferingSameStateCount) {
                                 playerBufferState.fixAttempts++;
                                 // Cap: at most ONE reload per recovery window. After reloading once,
                                 // stay on pause/play until playback recovers. Prevents reload cascades.
@@ -2786,7 +2792,7 @@
                             }
                         }
                     }
-                } catch (e) {}
+                } catch {}
                 if (!latencyKnown) {
                     console.log('[AD DEBUG] Latency unknown (seekable unavailable) — proceeding with reload');
                 } else if (latencySec > 7) {
@@ -2956,7 +2962,6 @@
             // Always restore muted/volume state after reload — Chrome autoplay policy can force muted.
             // Block must always run: if Twitch hasn't written LS values yet (fresh session, private mode,
             // cleared cache), the video still needs unmute after Chrome's autoplay mute on reload.
-            {
                 setTimeout(() => {
                     try {
                         if (currentQualityLS) {
@@ -3000,7 +3005,6 @@
                         }
                     } catch {}
                 }, 3000);
-            }
             return;
         }
     }
@@ -3075,25 +3079,29 @@
                     if (typeof deviceId !== 'string') {
                         deviceId = headers['Device-ID'];
                     }
-                    if (typeof deviceId === 'string' && GQLDeviceID != deviceId) {
+                    if (typeof deviceId === 'string' && GQLDeviceID !== deviceId) {
                         GQLDeviceID = deviceId;
                         postTwitchWorkerMessage('UpdateDeviceId', GQLDeviceID);
                     }
                     const headerClientVersion = headers['Client-Version'];
                     if (typeof headerClientVersion === 'string' && headerClientVersion !== ClientVersion) {
-                        postTwitchWorkerMessage('UpdateClientVersion', ClientVersion = headerClientVersion);
+                        ClientVersion = headerClientVersion;
+                        postTwitchWorkerMessage('UpdateClientVersion', ClientVersion);
                     }
                     const headerClientSession = headers['Client-Session-Id'];
                     if (typeof headerClientSession === 'string' && headerClientSession !== ClientSession) {
-                        postTwitchWorkerMessage('UpdateClientSession', ClientSession = headerClientSession);
+                        ClientSession = headerClientSession;
+                        postTwitchWorkerMessage('UpdateClientSession', ClientSession);
                     }
                     const headerClientIntegrityHeader = headers['Client-Integrity'];
                     if (typeof headerClientIntegrityHeader === 'string' && headerClientIntegrityHeader !== ClientIntegrityHeader) {
-                        postTwitchWorkerMessage('UpdateClientIntegrityHeader', ClientIntegrityHeader = headerClientIntegrityHeader);
+                        ClientIntegrityHeader = headerClientIntegrityHeader;
+                        postTwitchWorkerMessage('UpdateClientIntegrityHeader', ClientIntegrityHeader);
                     }
                     const headerAuthorizationHeader = headers['Authorization'];
                     if (typeof headerAuthorizationHeader === 'string' && headerAuthorizationHeader !== AuthorizationHeader) {
-                        postTwitchWorkerMessage('UpdateAuthorizationHeader', AuthorizationHeader = headerAuthorizationHeader);
+                        AuthorizationHeader = headerAuthorizationHeader;
+                        postTwitchWorkerMessage('UpdateAuthorizationHeader', AuthorizationHeader);
                     }
                     if (!hasLoggedHeaders && GQLDeviceID && AuthorizationHeader) {
                         hasLoggedHeaders = true;
@@ -3203,8 +3211,8 @@
         if (lsReloadAfterAd !== null) {
             ReloadPlayerAfterAd = lsReloadAfterAd === 'true';
         }
-        const lsReloadCooldown = parseInt(localStorage.getItem('twitchAdSolutions_reloadCooldownSeconds') ?? '');
-        if (!isNaN(lsReloadCooldown) && lsReloadCooldown >= 0) {
+        const lsReloadCooldown = parseInt(localStorage.getItem('twitchAdSolutions_reloadCooldownSeconds') ?? '', 10);
+        if (!Number.isNaN(lsReloadCooldown) && lsReloadCooldown >= 0) {
             ReloadCooldownSeconds = lsReloadCooldown;
         }
         const lsDisableReloadCap = localStorage.getItem('twitchAdSolutions_disableReloadCap');
@@ -3212,11 +3220,11 @@
             DisableReloadCap = lsDisableReloadCap === 'true';
         }
         const lsDriftRate = parseFloat(localStorage.getItem('twitchAdSolutions_driftCorrectionRate') ?? '');
-        if (!isNaN(lsDriftRate) && lsDriftRate >= 0) {
+        if (!Number.isNaN(lsDriftRate) && lsDriftRate >= 0) {
             DriftCorrectionRate = lsDriftRate;
         }
-        const lsEarlyReload = parseInt(localStorage.getItem('twitchAdSolutions_earlyReloadPollThreshold') ?? '');
-        if (!isNaN(lsEarlyReload) && lsEarlyReload >= 0) {
+        const lsEarlyReload = parseInt(localStorage.getItem('twitchAdSolutions_earlyReloadPollThreshold') ?? '', 10);
+        if (!Number.isNaN(lsEarlyReload) && lsEarlyReload >= 0) {
             EarlyReloadPollThreshold = lsEarlyReload;
         }
         const lsPlayerType = localStorage.getItem('twitchAdSolutions_playerType');
@@ -3274,7 +3282,7 @@
     hookFetch();
     // Hook XHR to detect CSAI ad requests that bypass fetch
     const realXHROpen = XMLHttpRequest.prototype.open;
-    XMLHttpRequest.prototype.open = maskAsNative(/** @this {XMLHttpRequest} */ function(method, url) {
+    XMLHttpRequest.prototype.open = maskAsNative(/** @this {XMLHttpRequest} */ function(_method, url) {
         if (typeof url === 'string' && url.includes('edge.ads.twitch.tv')) {
             const csaiType = url.includes('bp=midroll') ? 'midroll' : url.includes('bp=preroll') ? 'preroll' : 'unknown';
             countCsaiRequest(csaiType, 'xhr');

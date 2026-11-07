@@ -10,11 +10,9 @@
 // The extracted functions are the same ones vaft serializes into its worker via
 // .toString(), so they must not depend on anything outside the declarations loaded here;
 // a missing dependency surfaces as a ReferenceError in the test, as it would in the worker.
-'use strict';
-
-const fs = require('fs');
-const path = require('path');
-const vm = require('vm');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
 const acorn = require('acorn');
 
 const SCRIPT_PATH = path.join(__dirname, '..', 'vaft', 'vaft.user.js');

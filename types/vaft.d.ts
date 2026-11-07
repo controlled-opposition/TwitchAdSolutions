@@ -190,6 +190,7 @@ interface StreamInfo {
 }
 
 /** Return value of parseAttributes(): numeric-looking values become numbers. */
+// biome-ignore lint/suspicious/noExplicitAny: values are strings or numbers depending on the attribute; callers know which
 type M3u8Attributes = Record<string, any>;
 
 // ---------------------------------------------------------------------------
@@ -316,6 +317,7 @@ interface PlayerBufferState {
 
 /** A React fiber node. */
 interface ReactFiber {
+    // biome-ignore lint/suspicious/noExplicitAny: React component instances of any shape
     stateNode?: any;
     child?: ReactFiber | null;
     sibling?: ReactFiber | null;
@@ -324,6 +326,7 @@ interface ReactFiber {
 /** The #root element, carrying React's internal container properties. */
 type ReactRootElement = Element & {
     _reactRootContainer?: { _internalRoot?: { current?: ReactFiber } };
+    // biome-ignore lint/suspicious/noExplicitAny: React's __reactContainer$<random> / __reactFiber$<random> keys
     [key: string]: any;
 };
 

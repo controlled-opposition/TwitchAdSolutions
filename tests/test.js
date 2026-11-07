@@ -393,6 +393,7 @@ assert(isValidWorker({ toString: () => 'function Worker() { isVariantA }' }) ===
 assert(isValidWorker({ toString: () => 'function Worker() { besuper/ }' }) === true, 'allows worker with besuper reinsert');
 assert(isValidWorker({ toString: () => 'function Worker() { /* clean */ }' }) === true, 'allows clean worker without conflicts');
 assert(isValidWorker({ toString: () => 'function Worker() { twitch isVariantA }' }) === true, 'allows conflict + reinsert combination');
+// biome-ignore lint/suspicious/noTemplateCurlyInString: literal TwitchNoSub marker
 assert(isValidWorker({ toString: () => 'function Worker() { ${patch_url} }' }) === true, 'allows worker with ${patch_url} reinsert');
 
 // ============================================================
@@ -448,7 +449,7 @@ assert(typeof attrsEmpty === 'object', 'returns object for empty string');
 // from the template itself so newly serialized functions are covered automatically.
 console.log('--- worker blob functions ---');
 {
-    const fs = require('fs');
+    const fs = require('node:fs');
     const { SCRIPT_PATH } = require('./load-vaft');
     const serialized = [...fs.readFileSync(SCRIPT_PATH, 'utf8').matchAll(/\$\{(\w+)\.toString\(\)\}/g)].map((m) => m[1]);
     assert(serialized.length >= 10, 'found the serialized function list in the worker template (' + serialized.length + ')');
