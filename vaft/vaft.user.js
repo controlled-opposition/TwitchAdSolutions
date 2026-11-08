@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TwitchAdSolutions (vaft)
 // @namespace    https://github.com/controlled-opposition/TwitchAdSolutions
-// @version      69.4.1
+// @version      69.4.2
 // @description  Multiple solutions for blocking Twitch ads (vaft)
 // @updateURL    https://github.com/controlled-opposition/TwitchAdSolutions/raw/master/vaft/vaft.user.js
 // @downloadURL  https://github.com/controlled-opposition/TwitchAdSolutions/raw/master/vaft/vaft.user.js
@@ -613,8 +613,10 @@
     }
     playerState.setSrc({ isNewMediaPlayerInstance: hardReload, refreshAccessToken: refreshToken });
     postTwitchWorkerMessage("TriggeredPlayerReload");
-    player.play()?.catch?.(() => {
-    });
+    if (hardReload) {
+      player.play()?.catch?.(() => {
+      });
+    }
     setTimeout(() => {
       try {
         for (const { key, restoreEmpty } of PRESERVED_PLAYER_SETTINGS) {
@@ -2981,7 +2983,7 @@
   }
 
   // src/page/index.ts
-  var ourTwitchAdSolutionsVersion = 100;
+  var ourTwitchAdSolutionsVersion = 101;
   function main() {
     let _isNested = false;
     try {

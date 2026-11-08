@@ -68,6 +68,7 @@ Options (all repeatable ones may be given many times):
 | `--at "<sec>:<js>"` | Evaluate page-world JS at that second; result goes into the log as `[action]`. The script's own console hooks are the user's tools: `simulateAds(1)`, `simulateAds(0)`, `allSegmentsAreAdSegments()`, `reloadTwitchPlayer()`. |
 | `--shots 5,15,29` | Screenshot seconds (default: 5, middle, last). |
 | `--no-inject` | Baseline: same page, settings seeded, vaft not injected. |
+| `--network` | Also log usher, playlist and GQL requests per session as `[net] REQ/RES/FAIL` lines in `console.log`. |
 
 `drive` prints `summary.json` to stdout. Key fields:
 
@@ -81,6 +82,11 @@ Options (all repeatable ones may be given many times):
   it played. `resolutions` lists every size seen (640x360 = autoplay backup / 360p).
 - `stalledSecs`: seconds where the video was unpaused but `currentTime` didn't move.
 - `playerErrorSecs`: seconds the player showed `Error #NNNN`.
+
+For the player's own reasoning (quality picks, renditions, `stream not supported`), enable IVS debug logs from
+the page with an `--at` action that finds the player instance through the React fiber under `#root` (the node
+whose `stateNode.props.mediaPlayerInstance` is set; use its `.playerInstance` if present) and calls
+`setLogLevel('debug')`. Its output arrives as `[worker]` lines.
 
 Feature recipes (exact commands and pass conditions): [features/README.md](features/README.md).
 
@@ -126,6 +132,8 @@ every session, including failed ones. `.verify/` is gitignored.
 ## Helpers
 
 - `scripts/vaftctl.mjs` (executable): `launch`, `doctor`, `channels`, `drive`, `teardown`, `help`. Unknown or
-  malformed flags exit 1 with the reason (a quoted `"--ls key=value"` is one argument and is rejected).
+  malformed flags exit 1 with the reason (a quoted `"--ls key=value"` is one argument and is rejected; an
+  `--at` whose time isn't a number is rejected).
+- In zsh, write `--at "${t}:js"`, not `"$t:js"`: zsh reads `$t:r` and similar as history modifiers.
 - `VAFT_VERIFY_DIR` overrides the state/evidence dir; `VAFT_CHROME` overrides the Chrome binary (default
   `google-chrome`).

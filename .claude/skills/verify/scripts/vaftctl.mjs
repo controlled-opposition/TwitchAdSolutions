@@ -35,8 +35,8 @@ const alive = (pid) => {
     }
 };
 
-const FLAGS = new Set(['headful', 'n', 'channel', 'url', 'seconds', 'name', 'ls', 'at', 'shots', 'no-inject']);
-const BOOL_FLAGS = new Set(['headful', 'no-inject']);
+const FLAGS = new Set(['headful', 'n', 'channel', 'url', 'seconds', 'name', 'ls', 'at', 'shots', 'no-inject', 'network']);
+const BOOL_FLAGS = new Set(['headful', 'no-inject', 'network']);
 function parseArgs(argv) {
     const out = { _: [], ls: [], at: [] };
     for (let i = 0; i < argv.length; i++) {
@@ -331,7 +331,9 @@ async function drive(opts) {
     const actions = opts.at
         .map((a) => {
             const c = String(a).indexOf(':');
-            return { t: Number(String(a).slice(0, c)), js: String(a).slice(c + 1) };
+            const t = c > 0 ? Number(String(a).slice(0, c)) : NaN;
+            if (!Number.isFinite(t)) die(`--at needs "<seconds>:<js>", got ${JSON.stringify(a)}`);
+            return { t, js: String(a).slice(c + 1) };
         })
         .sort((a, b) => a.t - b.t);
     const shotTimes = String(opts.shots || [5, Math.round(seconds / 2), seconds - 1].join(','))
@@ -348,6 +350,13 @@ async function drive(opts) {
     const rel = () => ((Date.now() - t0) / 1000).toFixed(2).padStart(7);
     const log = (src, text) => appendFileSync(logPath, `${rel()} [${src}] ${text}\n`);
 
+    // --network: playlist (usher/m3u8) and access-token traffic per session, in network.log and console.log.
+    const netIds = new Set();
+    const isMediaUrl = (u) => /usher\.ttvnw\.net|\.m3u8|ttvnw\.net\/v1\/playlist|gql\.twitch\.tv/.test(u);
+    const netLog = (src, text) => {
+        netIds.add(text.split(' ')[1]);
+        log(src, '[net] ' + text);
+    };
     const cdp = await Cdp.connect(await browserWs(st));
     const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' });
     const { sessionId: page } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
@@ -357,6 +366,12 @@ async function drive(opts) {
         if (msg.method === 'Runtime.consoleAPICalled' && label) {
             const text = msg.params.args.map((a) => (a.value !== undefined ? String(a.value) : a.description || a.type)).join(' ');
             log(label, text);
+        } else if (msg.method === 'Network.requestWillBeSent' && label && isMediaUrl(msg.params.request.url)) {
+            netLog(label, 'REQ ' + msg.params.requestId + ' ' + msg.params.request.url.split('?')[0]);
+        } else if (msg.method === 'Network.responseReceived' && label && isMediaUrl(msg.params.response.url)) {
+            netLog(label, 'RES ' + msg.params.requestId + ' ' + msg.params.response.status + ' ' + msg.params.response.url.split('?')[0]);
+        } else if (msg.method === 'Network.loadingFailed' && label && netIds.has(msg.params.requestId)) {
+            netLog(label, 'FAIL ' + msg.params.requestId + ' ' + msg.params.errorText + (msg.params.canceled ? ' (canceled)' : ''));
         } else if (msg.method === 'Runtime.exceptionThrown' && label) {
             const d = msg.params.exceptionDetails;
             log(label, 'EXCEPTION ' + (d.exception?.description || d.text).split('\n')[0]);
@@ -367,6 +382,7 @@ async function drive(opts) {
             log('cdp', 'attached ' + targetInfo.type + ' ' + (targetInfo.url || '').slice(0, 80));
             try {
                 await cdp.send('Runtime.enable', {}, sessionId);
+                if (opts.network) await cdp.send('Network.enable', {}, sessionId).catch(() => {});
                 await cdp.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }, sessionId).catch(() => {});
             } catch {}
             cdp.send('Runtime.runIfWaitingForDebugger', {}, sessionId).catch(() => {});
@@ -374,6 +390,7 @@ async function drive(opts) {
     });
     await cdp.send('Page.enable', {}, page);
     await cdp.send('Runtime.enable', {}, page);
+    if (opts.network) await cdp.send('Network.enable', {}, page);
     await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false }, page);
     // Workers (Twitch's video worker) pause until we have enabled Runtime on them, so no early log is lost.
     await cdp.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }, page);
@@ -492,6 +509,7 @@ const HELP = `vaftctl — drive vaft/vaft.user.js in real Chrome on live twitch.
         [--ls key=value]...  seed twitchAdSolutions_<key> before load (others are cleared)
         [--at "<sec>:<js>"]... evaluate page JS at <sec> (e.g. "8:simulateAds(1)")
         [--shots 5,15,29]    screenshot times   [--no-inject] baseline without vaft
+        [--network]          log playlist/usher/GQL requests per session as [net] lines
   teardown                  kill the Chrome launch started, delete its profile; keep evidence
 State/evidence dir: ${DIR} (override with VAFT_VERIFY_DIR)`;
 

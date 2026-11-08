@@ -48,8 +48,10 @@ Preconditions:
   skips `site`, and so on. The break lasts until `simulateAds(0)`; it then ends after 3 ad-free polls (~4-5 s).
 - A real preroll in progress when `simulateAds(1)` fires merges into one break; check that no `Ad detected`
   precedes the `SimulatedAdsDepth: 1` line, or rerun.
-- The soft end-of-break reload once left the player on `Error #4000` / worker `Player stopping playback -
-  error Player:2 (ErrorNotSupported code 0 - No playable format)` for the rest of a 60 s run (theburntpeanut,
-  2026-11-08, earlier CDP injector); two repeats recovered. Watch `playerErrorSecs` on every break proof.
+- Up to v69.4.1 the end-of-break soft reload broke fMP4 channels (theburntpeanut: 18 of 22): an
+  `IVS WASM worker crashed` line followed by a rescuing hard reload, or worker `Player stopping playback - error
+  Player:2 (ErrorNotSupported code 0 - No playable format)` and `Error #4000` on screen. A crash that the hard
+  reload rescues still counts as a failed soft reload. Prove `break-reload` on an fMP4 channel (media playlist
+  has `#EXT-X-MAP`) as well as a TS one, and grep for `WASM worker crashed` as well as `playerErrorSecs`.
 - Video `currentTime` resets to ~0 on every player reload; `advancedSec` in the summary is last-minus-first and
   understates playback across a reload. Read the samples.

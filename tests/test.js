@@ -878,7 +878,10 @@ function makePage({ video, paused = false, pip = null, storage = {} } = {}) {
         isPaused: () => paused,
         core: { paused, state: { muted: false, volume: 1, quality: { group: 'chunked' } } },
         pause() {},
-        play: () => Promise.resolve(),
+        play: () => {
+            page.playCalls++;
+            return Promise.resolve();
+        },
         getHTMLVideoElement: () => page.videos[0],
     };
     const playerState = { setSrc: (o) => setSrcCalls.push(o), setInitialPlaybackSettings() {} };
@@ -894,6 +897,7 @@ function makePage({ video, paused = false, pip = null, storage = {} } = {}) {
         videos: [video],
         listeners,
         setSrcCalls,
+        playCalls: 0,
         advance(ms) {
             now += ms;
             for (const t of timers.splice(0).sort((x, y) => x.at - y.at)) {
@@ -963,6 +967,17 @@ function makeVideo(overrides = {}) {
         { isNewMediaPlayerInstance: false, refreshAccessToken: false },
         'codec-swap reload is soft',
     );
+    // A soft setSrc reuses the player instance; play() on it before the new master loads crashed IVS's
+    // WASM or failed with Error #4000 (no_playable_renditions) on live Twitch.
+    assertEq(page.playCalls, 0, 'codec-swap soft reload: no play() on the loading player');
+    page = makePage({ video: makeVideo({ readyState: 1 }) });
+    assertEq(page.mod.doTwitchPlayerTask('reload', 'post-ad'), 'done', 'stalled player: post-ad reload done');
+    assertDeepEq(
+        page.setSrcCalls[0],
+        { isNewMediaPlayerInstance: false, refreshAccessToken: false },
+        'post-ad reload is soft',
+    );
+    assertEq(page.playCalls, 0, 'post-ad soft reload: no play() on the loading player');
     page = makePage({ video: makeVideo({ readyState: 1 }) });
     assertEq(page.mod.doTwitchPlayerTask('reload', 'early'), 'done', 'stalled player: early reload done');
     assertDeepEq(page.setSrcCalls[0], { isNewMediaPlayerInstance: true, refreshAccessToken: true }, 'early is hard');

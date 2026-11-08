@@ -161,7 +161,11 @@ export function doTwitchPlayerTask(task: 'pausePlay' | 'reload', reloadKind?: Re
     }
     playerState.setSrc({ isNewMediaPlayerInstance: hardReload, refreshAccessToken: refreshToken });
     postTwitchWorkerMessage('TriggeredPlayerReload');
-    player.play()?.catch?.(() => {});
+    // A soft setSrc reloads this same instance and resumes playback itself. Calling play() on it before
+    // the new master loads crashed IVS's WASM or failed with Error #4000 (no_playable_renditions).
+    if (hardReload) {
+        player.play()?.catch?.(() => {});
+    }
     // Chrome's autoplay policy can mute the player on reload, even with no Twitch volume keys saved yet.
     setTimeout(() => {
         try {

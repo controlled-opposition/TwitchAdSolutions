@@ -7,7 +7,7 @@ import { loadLocalStorageConfig, onContentLoaded } from './storage.ts';
 import { hookWindowWorker } from './worker-hook.ts';
 import { postTwitchWorkerMessage } from './workers.ts';
 
-const ourTwitchAdSolutionsVersion = 100;
+const ourTwitchAdSolutionsVersion = 101;
 
 function main() {
     // Userscript managers inject into every matching frame, and Twitch's channel page holds hidden
