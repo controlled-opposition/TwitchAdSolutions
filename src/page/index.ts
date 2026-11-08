@@ -14,9 +14,10 @@ function main() {
     // cross-origin iframes. Only Twitch's embed contexts host a player in a nested frame
     // (https://dev.twitch.tv/docs/embed/video-and-clips/).
     // Not `window !== window.top`: Tampermonkey's window proxy can make that true on the top frame.
+    // frameElement is null in a cross-origin frame, where reading top's location throws instead.
     let _isNested = false;
     try {
-        _isNested = window.frameElement !== null;
+        _isNested = window.frameElement !== null || window.top?.location.href !== document.location.href;
     } catch (_e) {
         _isNested = true;
     }

@@ -2993,7 +2993,7 @@
   function main() {
     let _isNested = false;
     try {
-      _isNested = window.frameElement !== null;
+      _isNested = window.frameElement !== null || window.top?.location.href !== document.location.href;
     } catch (_e) {
       _isNested = true;
     }

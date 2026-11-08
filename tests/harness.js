@@ -88,6 +88,8 @@ export function injectWorker(scriptPath, options = {}) {
         clearInterval() {},
     });
     page.window = page;
+    page.top = page;
+    Object.defineProperty(page, 'location', { get: () => page.document.location, configurable: true });
     page.frameElement = null;
     page.addEventListener = () => {};
     options.setup?.(page);

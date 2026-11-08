@@ -1413,6 +1413,65 @@ asyncTests.push(async () => {
     assertEq(sent.filter((m) => m.key === 'ReloadResult').length, 0, 'no requestId: no answer');
 });
 
+asyncTests.push(async () => {
+    console.log('--- built userscript: nested-frame guard ---');
+    if (!existsSync(BUILT)) return;
+    const runs = (setup) => {
+        try {
+            injectWorker(BUILT, { setup });
+            return true;
+        } catch (e) {
+            if (/got 0/.test(e.message)) return false;
+            throw e;
+        }
+    };
+    const crossOriginTop = {
+        get location() {
+            throw new Error('SecurityError: cross-origin');
+        },
+    };
+    assert(
+        runs(() => {}),
+        'top frame: runs',
+    );
+    assert(
+        runs((page) => {
+            page.top = { location: { href: page.document.location.href } };
+        }),
+        'top frame behind a userscript-manager proxy (window.top is another object): runs',
+    );
+    assert(
+        !runs((page) => {
+            page.top = crossOriginTop;
+            page.document.location = {
+                hostname: 'passport.twitch.tv',
+                pathname: '/frame',
+                href: 'https://passport.twitch.tv/frame',
+            };
+        }),
+        'cross-origin hidden iframe (frameElement null, top unreadable): skipped',
+    );
+    assert(
+        runs((page) => {
+            page.top = crossOriginTop;
+            page.document.location = {
+                hostname: 'player.twitch.tv',
+                pathname: '/',
+                href: 'https://player.twitch.tv/?channel=testchan',
+            };
+        }),
+        'Twitch embed in a third-party page (cross-origin): runs',
+    );
+    assert(
+        !runs((page) => {
+            page.frameElement = {};
+            page.top = { location: { href: 'https://www.twitch.tv/testchan' } };
+            page.document.location = { hostname: 'www.twitch.tv', pathname: '/x', href: 'https://www.twitch.tv/x' };
+        }),
+        'same-origin nested non-embed frame: skipped',
+    );
+});
+
 // ============================================================
 // Results
 // ============================================================
