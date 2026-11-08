@@ -1414,6 +1414,23 @@ asyncTests.push(async () => {
 });
 
 asyncTests.push(async () => {
+    console.log('--- built userscript: backup search right after a reload ---');
+    if (!existsSync(BUILT)) return;
+    const { transcript } = await runScenario(BUILT, {
+        phases: [
+            { ads: 0, polls: 2 },
+            { ads: 4, polls: 3 },
+            { ads: 0, polls: 3 },
+            { ads: 4, polls: 1 },
+        ],
+    });
+    const source = (label) =>
+        transcript.find((t) => t.label === label)?.body.match(/edge\.example\/backup-([^/]+)\//)?.[1];
+    assertEq(source('phase 1 poll 0'), 'site', 'first break commits site (and pins it)');
+    assertEq(source('phase 3 poll 0'), 'site', 'ad poll inside the post-reload window still uses the pinned type');
+});
+
+asyncTests.push(async () => {
     console.log('--- built userscript: reload answers go to the requesting worker ---');
     if (!existsSync(BUILT)) return;
     const sent = [];

@@ -30,7 +30,6 @@ function createWorkerState() {
         ] as PlayerType[],
         FallbackPlayerType: 'site' as PlayerType, // more reliable than embed when every Source type is ad-laden
         PlayerReloadMinimalRequestsTime: 1500,
-        PlayerReloadMinimalRequestsPlayerIndex: 2,
         StreamInfos: Object.create(null) as Record<string, StreamInfo>,
         StreamInfosByUrl: Object.create(null) as Record<string, StreamInfo>,
         SimulatedAdsDepth: 0,

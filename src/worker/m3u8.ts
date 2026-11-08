@@ -289,15 +289,10 @@ async function searchBackup(
     let backupColdTokenFetches = 0;
     let found: BackupPlaylist | null = null;
     let fallback: BackupPlaylist | null = null;
-    let startIndex = 0;
-    let isDoingMinimalRequests = false;
-    if (streamInfo.LastPlayerReload > Date.now() - state.PlayerReloadMinimalRequestsTime) {
-        // A reloading player makes many requests, which slows the backup stream; prefer a single type.
-        startIndex = state.PlayerReloadMinimalRequestsPlayerIndex;
-        isDoingMinimalRequests = true;
-    }
+    // A reloading player makes many requests, which slows the backup stream; commit the first type fetched.
+    const isDoingMinimalRequests = streamInfo.LastPlayerReload > Date.now() - state.PlayerReloadMinimalRequestsTime;
     const playerTypesToTry = backupOrder(streamInfo, brk);
-    for (let playerTypeIndex = startIndex; !found && playerTypeIndex < playerTypesToTry.length; playerTypeIndex++) {
+    for (let playerTypeIndex = 0; !found && playerTypeIndex < playerTypesToTry.length; playerTypeIndex++) {
         const playerType = playerTypesToTry[playerTypeIndex];
         const failedAt = brk.FailedBackupPlayerTypes.get(playerType);
         // 5s lockout: a contaminated backup type can turn clean within seconds. Costs ~3x more retry
@@ -377,10 +372,7 @@ async function searchBackup(
     if (found) {
         return { ...found, searchStartedAt: backupSearchStart, coldTokenFetches: backupColdTokenFetches };
     }
-    console.log(
-        '[AD DEBUG] No ad-free backup stream found — ads may leak. Tried: ' +
-            playerTypesToTry.slice(startIndex).join(', '),
-    );
+    console.log('[AD DEBUG] No ad-free backup stream found — ads may leak. Tried: ' + playerTypesToTry.join(', '));
     return null;
 }
 

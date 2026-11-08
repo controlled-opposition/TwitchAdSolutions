@@ -1352,7 +1352,6 @@
       FallbackPlayerType: "site",
       // more reliable than embed when every Source type is ad-laden
       PlayerReloadMinimalRequestsTime: 1500,
-      PlayerReloadMinimalRequestsPlayerIndex: 2,
       StreamInfos: /* @__PURE__ */ Object.create(null),
       StreamInfosByUrl: /* @__PURE__ */ Object.create(null),
       SimulatedAdsDepth: 0,
@@ -2256,14 +2255,9 @@
     let backupColdTokenFetches = 0;
     let found = null;
     let fallback = null;
-    let startIndex = 0;
-    let isDoingMinimalRequests = false;
-    if (streamInfo.LastPlayerReload > Date.now() - state.PlayerReloadMinimalRequestsTime) {
-      startIndex = state.PlayerReloadMinimalRequestsPlayerIndex;
-      isDoingMinimalRequests = true;
-    }
+    const isDoingMinimalRequests = streamInfo.LastPlayerReload > Date.now() - state.PlayerReloadMinimalRequestsTime;
     const playerTypesToTry = backupOrder(streamInfo, brk);
-    for (let playerTypeIndex = startIndex; !found && playerTypeIndex < playerTypesToTry.length; playerTypeIndex++) {
+    for (let playerTypeIndex = 0; !found && playerTypeIndex < playerTypesToTry.length; playerTypeIndex++) {
       const playerType = playerTypesToTry[playerTypeIndex];
       const failedAt = brk.FailedBackupPlayerTypes.get(playerType);
       if (failedAt && Date.now() - failedAt < 5e3) {
@@ -2329,9 +2323,7 @@
     if (found) {
       return { ...found, searchStartedAt: backupSearchStart, coldTokenFetches: backupColdTokenFetches };
     }
-    console.log(
-      "[AD DEBUG] No ad-free backup stream found — ads may leak. Tried: " + playerTypesToTry.slice(startIndex).join(", ")
-    );
+    console.log("[AD DEBUG] No ad-free backup stream found — ads may leak. Tried: " + playerTypesToTry.join(", "));
     return null;
   }
   async function fetchBackupEncodings(streamInfo, brk, playerType, realFetch) {
