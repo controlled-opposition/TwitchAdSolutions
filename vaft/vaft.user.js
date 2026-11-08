@@ -743,9 +743,9 @@
     if (!cachedPlayerRootDiv || !cachedPlayerRootDiv.isConnected) return;
     const sdaElements = document.querySelectorAll('[data-test-selector="sda-wrapper"]');
     for (let i = 0; i < sdaElements.length; i++) {
-      if (!sdaElements[i].dataset.tasHidden) {
-        sdaElements[i].dataset.tasHidden = "";
-        sdaElements[i].style.setProperty("display", "none", "important");
+      const style = sdaElements[i].style;
+      if (style.getPropertyValue("display") !== "none" || style.getPropertyPriority("display") !== "important") {
+        style.setProperty("display", "none", "important");
         if (!loggedSdaHide) {
           loggedSdaHide = true;
           console.log("[AD DEBUG] Hidden Twitch stream display ad");

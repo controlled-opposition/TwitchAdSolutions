@@ -8,9 +8,10 @@ export function hideTwitchAdOverlays() {
     if (!cachedPlayerRootDiv || !cachedPlayerRootDiv.isConnected) return;
     const sdaElements = document.querySelectorAll('[data-test-selector="sda-wrapper"]') as NodeListOf<HTMLElement>;
     for (let i = 0; i < sdaElements.length; i++) {
-        if (!sdaElements[i].dataset.tasHidden) {
-            sdaElements[i].dataset.tasHidden = '';
-            sdaElements[i].style.setProperty('display', 'none', 'important');
+        const style = sdaElements[i].style;
+        // Checks the style itself rather than a marker, because a React re-render can drop the inline style.
+        if (style.getPropertyValue('display') !== 'none' || style.getPropertyPriority('display') !== 'important') {
+            style.setProperty('display', 'none', 'important');
             if (!loggedSdaHide) {
                 loggedSdaHide = true;
                 console.log('[AD DEBUG] Hidden Twitch stream display ad');

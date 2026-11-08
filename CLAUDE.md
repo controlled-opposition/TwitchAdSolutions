@@ -135,7 +135,7 @@ TypeScript 7 (`tsconfig.base.json`, extended by `tsconfig.json` for the page + s
 `hideTwitchAdOverlays()` hides one overlay type during ad blocking:
 - **Stream display ads (SDA)** — via exact `[data-test-selector="sda-wrapper"]` selector, no parent walking
 
-Called on every buffer monitor tick. Guards via `dataset.tasHidden` to skip already-hidden elements.
+Called on every buffer monitor tick. Skips an element whose inline style already has `display: none !important`, and re-hides one whose style a re-render dropped.
 
 **Previously removed:**
 - Turbo promo / "allow ads" overlay hide (PR #143) — used `.player-overlay-background` which is Twitch's generic modal scrim (also used for content gates, error dialogs, subscription warnings). Too broad to use safely.

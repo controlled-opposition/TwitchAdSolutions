@@ -1431,6 +1431,46 @@ asyncTests.push(async () => {
 });
 
 asyncTests.push(async () => {
+    console.log('--- SDA overlay hide ---');
+    const writes = [];
+    const sda = {
+        dataset: {},
+        style: {
+            props: {},
+            setProperty(k, v, p) {
+                writes.push(k);
+                this.props[k] = { v, p };
+            },
+            getPropertyValue(k) {
+                return this.props[k]?.v ?? '';
+            },
+            getPropertyPriority(k) {
+                return this.props[k]?.p ?? '';
+            },
+        },
+    };
+    const overlay = { style: { display: 'none' }, P: { textContent: '' } };
+    const root = { isConnected: true, querySelector: () => overlay };
+    const page = loadModules(['src/page/overlay.ts', 'src/page/state.ts'], {
+        globals: {
+            document: {
+                querySelector: (sel) => (sel === '.video-player' ? root : null),
+                querySelectorAll: () => [sda],
+                getElementsByTagName: () => [],
+                location: { href: 'https://www.twitch.tv/x' },
+            },
+        },
+    });
+    page.updateAdblockBanner({ hasAds: true });
+    assertEq(sda.style.getPropertyValue('display'), 'none', 'first tick hides the SDA wrapper');
+    page.updateAdblockBanner({ hasAds: true });
+    assertEq(writes.length, 1, 'an already-hidden wrapper is not written again');
+    sda.style.props = {};
+    page.updateAdblockBanner({ hasAds: true });
+    assertEq(sda.style.getPropertyValue('display'), 'none', 'a wrapper whose inline style was dropped is re-hidden');
+});
+
+asyncTests.push(async () => {
     console.log('--- built userscript: reload answers go to the requesting worker ---');
     if (!existsSync(BUILT)) return;
     const sent = [];
