@@ -274,7 +274,7 @@ interface MuteRestore {
 }
 let muteRestore: MuteRestore | null = null;
 
-export function armMuteRestore() {
+function armMuteRestore() {
     const prev = muteRestore;
     prev?.cancel();
     muteRestore = null;

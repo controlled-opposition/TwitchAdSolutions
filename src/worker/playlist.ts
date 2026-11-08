@@ -73,7 +73,7 @@ export function resolutionArea(resolution: string): number {
     return width * height;
 }
 /** A variant playlist from a master (encodings) playlist. */
-export interface StreamVariant {
+interface StreamVariant {
     url: string;
     codecs: string;
 }
@@ -118,20 +118,11 @@ export function getStreamVariantForResolution(
     const sameFamily = family === 'unknown' ? [] : variants.filter((v) => videoCodecFamily(v.codecs) === family);
     const candidates = sameFamily.length > 0 ? sameFamily : variants;
     const targetArea = resolutionArea(resolutionInfo.Resolution);
-    let matched = null;
-    let matchedFrameRate = false;
     let closest = null;
     let closestDifference = Infinity;
     for (const v of candidates) {
-        if (
-            v.resolution === resolutionInfo.Resolution &&
-            (!matched || (!matchedFrameRate && v.frameRate === resolutionInfo.FrameRate))
-        ) {
-            matched = v;
-            matchedFrameRate = v.frameRate === resolutionInfo.FrameRate;
-            if (matchedFrameRate) {
-                return { url: v.url, codecs: v.codecs };
-            }
+        if (v.resolution === resolutionInfo.Resolution && v.frameRate === resolutionInfo.FrameRate) {
+            return { url: v.url, codecs: v.codecs };
         }
         const difference = Math.abs(resolutionArea(v.resolution) - targetArea);
         if (difference < closestDifference) {
@@ -140,14 +131,6 @@ export function getStreamVariantForResolution(
         }
     }
     return closest ? { url: closest.url, codecs: closest.codecs } : null;
-}
-
-/** URL of the variant getStreamVariantForResolution picks. */
-export function getStreamUrlForResolution(
-    encodingsM3u8: string,
-    resolutionInfo: Pick<ResolutionInfo, 'Resolution' | 'FrameRate'> & { Codecs?: string },
-): string | null {
-    return getStreamVariantForResolution(encodingsM3u8, resolutionInfo)?.url ?? null;
 }
 
 /**
@@ -160,4 +143,104 @@ export function isCodecMismatch(playerCodecs: string, backupCodecs: string): boo
         return videoCodecFamily(backupCodecs) !== videoCodecFamily(playerCodecs);
     }
     return isEnhancedCodec(backupCodecs);
+}
+
+/** A variant of a master playlist: its URL line, and its ResolutionInfo when it has a RESOLUTION. */
+interface MasterVariant {
+    url: string;
+    resolution: ResolutionInfo | null;
+}
+
+/**
+ * The variants of the main stream's master playlist. Unlike getStreamVariantForResolution, only
+ * URL lines containing '.m3u8' count, untrimmed.
+ */
+export function* parseMasterVariants(encodingsM3u8: string): Generator<MasterVariant> {
+    const lines = encodingsM3u8.split(/\r?\n/);
+    for (let i = 0; i < lines.length - 1; i++) {
+        if (!lines[i].startsWith('#EXT-X-STREAM-INF') || !lines[i + 1].includes('.m3u8')) {
+            continue;
+        }
+        const attributes = parseAttributes(lines[i]);
+        const resolution = attributes['RESOLUTION'];
+        yield {
+            url: lines[i + 1],
+            resolution: resolution
+                ? {
+                      Resolution: resolution,
+                      FrameRate: attributes['FRAME-RATE'],
+                      // CODECS is optional on a STREAM-INF line; keep every field string-valued so
+                      // readers can call string methods without a guard.
+                      Codecs: attributes['CODECS'] || '',
+                      // Copied onto the rewritten line by buildAvcOnlyMaster, so it references
+                      // media groups the AVC variant carries (TTV-AB v6.7.5 parser fix).
+                      Audio: attributes['AUDIO'] || '',
+                      Video: attributes['VIDEO'] || '',
+                      Subtitles: attributes['SUBTITLES'] || '',
+                      Url: lines[i + 1],
+                  }
+                : null,
+        };
+    }
+}
+
+// Replace a STREAM-INF attribute if present, else append it after a comma. An empty or
+// non-string value leaves the line unchanged.
+function replaceOrAppendStreamInfAttr(line: string, key: string, value: unknown): string {
+    if (typeof value !== 'string' || !value) return line;
+    const escaped = value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    const next = key + '="' + escaped + '"';
+    const pattern = new RegExp('(^|,)' + key + '=("[^"]*"|[^,]*)');
+    return pattern.test(line) ? line.replace(pattern, '$1' + next) : line + ',' + next;
+}
+
+/**
+ * The master playlist served during a codec swap: every enhanced (HEVC/AV1) variant line points
+ * at the AVC variant of closest pixel area instead. Null when the stream has no enhanced variant
+ * or no AVC one. AV1 counts as enhanced: like HEVC it can go black for a whole ad break on some
+ * browsers/hardware (GosuDRM/TTV-AB #47), so only AVC is a swap target (TTV-AB v12.0.9).
+ */
+export function buildAvcOnlyMaster(encodingsM3u8: string, variants: ResolutionInfo[]): string | null {
+    const avcVariants = variants.filter((v) => videoCodecFamily(v.Codecs) === 'avc');
+    if (avcVariants.length === 0 || !variants.some((v) => isEnhancedCodec(v.Codecs))) {
+        return null;
+    }
+    const lines = encodingsM3u8.split(/\r?\n/);
+    for (let i = 0; i < lines.length - 1; i++) {
+        if (!lines[i].startsWith('#EXT-X-STREAM-INF')) {
+            continue;
+        }
+        const attributes = parseAttributes(lines[i]);
+        if (!isEnhancedCodec(attributes['CODECS'])) {
+            continue;
+        }
+        const oldResolution = attributes['RESOLUTION'];
+        const targetArea = resolutionArea(oldResolution);
+        let target = null;
+        let closestDiff = Infinity;
+        for (const candidate of avcVariants) {
+            const diff = Math.abs(resolutionArea(candidate.Resolution) - targetArea);
+            if (diff < closestDiff) {
+                closestDiff = diff;
+                target = candidate;
+            }
+        }
+        if (!target) continue; // every area NaN (malformed RESOLUTION)
+        console.log(
+            'ModifiedM3U8 swap ' +
+                attributes['CODECS'] +
+                ' to ' +
+                target.Codecs +
+                ' oldRes:' +
+                oldResolution +
+                ' newRes:' +
+                target.Resolution,
+        );
+        lines[i] = lines[i].replace(/CODECS="[^"]+"/, `CODECS="${target.Codecs}"`);
+        lines[i] = replaceOrAppendStreamInfAttr(lines[i], 'AUDIO', target.Audio);
+        lines[i] = replaceOrAppendStreamInfAttr(lines[i], 'VIDEO', target.Video);
+        lines[i] = replaceOrAppendStreamInfAttr(lines[i], 'SUBTITLES', target.Subtitles);
+        lines[i + 1] = target.Url + ' '.repeat(i + 1); // The stream doesn't load unless each url line is unique
+    }
+    return lines.join('\n');
 }

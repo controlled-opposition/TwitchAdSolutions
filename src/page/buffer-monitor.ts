@@ -228,7 +228,7 @@ function checkStall(player: TwitchMediaPlayer, twitchState: TwitchPlayerState) {
                     video.paused,
             );
         }
-        doTwitchPlayerTask(step.action === 'reload' || state.PlayerBufferingDoPlayerReload ? 'reload' : 'pausePlay');
+        doTwitchPlayerTask(step.action === 'reload' ? 'reload' : 'pausePlay');
         playerBufferState.lastFixTime = Date.now();
     }
     // Detect position jump (native gap recovery) — drift to catch up.
@@ -287,7 +287,6 @@ function observeStall(
         (playerBufferState.videoCurrentTime === undefined || playerBufferState.videoCurrentTime === videoCurrentTime);
     const stalled =
         playerBufferState.hasStreamStarted &&
-        (!state.PlayerBufferingPrerollCheckEnabled || position > state.PlayerBufferingPrerollCheckOffset) &&
         // AND, not OR: a real stall is BOTH frozen position AND a draining buffer. Field reports
         // on Firefox at live edge showed the OR form firing during normal thin-buffer breathing
         // (~1-2s buffered, currentTime briefly idle waiting on a segment fetch) — pause/play

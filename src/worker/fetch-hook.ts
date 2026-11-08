@@ -1,14 +1,7 @@
 import { installHook } from '../shared/hook.ts';
 import type { ResolutionInfo, StreamInfo } from '../shared/types.ts';
 import { processM3U8 } from './m3u8.ts';
-import {
-    getServerTimeFromM3u8,
-    isEnhancedCodec,
-    parseAttributes,
-    replaceServerTimeInM3u8,
-    resolutionArea,
-    videoCodecFamily,
-} from './playlist.ts';
+import { buildAvcOnlyMaster, getServerTimeFromM3u8, parseMasterVariants, replaceServerTimeInM3u8 } from './playlist.ts';
 import { createStreamInfo } from './stream-info.ts';
 import { state } from './state.ts';
 
@@ -74,7 +67,7 @@ export function hookWorkerFetch(): boolean {
                 return passThroughOnError('master playlist', encodingsM3u8, async () => {
                     const serverTime = getServerTimeFromM3u8(encodingsM3u8);
                     let streamInfo: StreamInfo | null = state.StreamInfos[channelName];
-                    if (streamInfo != null && streamInfo.EncodingsM3U8 != null) {
+                    if (streamInfo != null) {
                         // Probe one variant of the cached encodings; if it's gone, the stream
                         // probably restarted and the cache is dead. v2 API variant lines are raw CDN
                         // URLs without '.m3u8', hence the fallback pattern. No probe URL, or a probe
@@ -93,7 +86,7 @@ export function hookWorkerFetch(): boolean {
                             streamInfo = null;
                         }
                     }
-                    if (streamInfo == null || streamInfo.EncodingsM3U8 == null) {
+                    if (streamInfo == null) {
                         // A new StreamInfo starts with no reload pending (ReloadPending is per
                         // stream), so a reload on the previous session can't bleed into this one.
                         console.log(
@@ -107,131 +100,20 @@ export function hookWorkerFetch(): boolean {
                             encodingsM3u8,
                             parsedUrl.search,
                         );
-                        const lines = encodingsM3u8.split(/\r?\n/);
-                        for (let i = 0; i < lines.length - 1; i++) {
-                            if (lines[i].startsWith('#EXT-X-STREAM-INF') && lines[i + 1].includes('.m3u8')) {
-                                const attributes = parseAttributes(lines[i]);
-                                const resolution = attributes['RESOLUTION'];
-                                if (resolution) {
-                                    const resolutionInfo = {
-                                        Resolution: resolution,
-                                        FrameRate: attributes['FRAME-RATE'],
-                                        // || '' like the three below: CODECS is optional on a STREAM-INF line,
-                                        // and this entry is pushed whenever RESOLUTION is present. Leaving it
-                                        // undefined is what let a direct .startsWith() reader throw and hang the
-                                        // master-playlist fetch. Keep every field in this object string-valued.
-                                        Codecs: attributes['CODECS'] || '',
-                                        // AUDIO/VIDEO/SUBTITLES groups are copied onto the rewritten STREAM-INF
-                                        // line during HEVC→AVC fallback so the variant references matching media
-                                        // groups (mirrors TTV-AB v6.7.5 parser fix). Without these, the rewritten
-                                        // line keeps the original HEVC variant's group ids, which point at audio
-                                        // tracks the AVC backup may not carry — black screen / audio desync.
-                                        Audio: attributes['AUDIO'] || '',
-                                        Video: attributes['VIDEO'] || '',
-                                        Subtitles: attributes['SUBTITLES'] || '',
-                                        Url: lines[i + 1],
-                                    };
-                                    streamInfo.Urls[lines[i + 1]] = resolutionInfo;
-                                    streamInfo.ResolutionList.push(resolutionInfo);
-                                }
-                                state.StreamInfosByUrl[lines[i + 1]] = streamInfo;
+                        const resolutionList: ResolutionInfo[] = [];
+                        for (const { url, resolution } of parseMasterVariants(encodingsM3u8)) {
+                            if (resolution) {
+                                streamInfo.Urls[url] = resolution;
+                                resolutionList.push(resolution);
                             }
+                            state.StreamInfosByUrl[url] = streamInfo;
                         }
-                        if (streamInfo.ResolutionList.length === 0) {
+                        if (resolutionList.length === 0) {
                             console.log(
                                 '[AD DEBUG] No resolutions parsed from encodings m3u8 — Twitch may have changed the format',
                             );
                         }
-                        // Codec-safe swap-target pool = AVC (H.264) only. Mirrors TTV-AB v12.0.9 /
-                        // parser.ts _isEnhancedCodecString: AV1 ('av0*') is an "enhanced" codec that can go
-                        // BLACK for the whole ad break on some browsers/hardware (GosuDRM/TTV-AB #47), exactly
-                        // like HEVC — so AV1 must NOT be a swap target. If a stream has no AVC at all
-                        // (enhanced-only), this list is empty and the swap below simply doesn't fire — we leave
-                        // the stream untouched, matching TTV-AB's all-enhanced short-circuit.
-                        const decodableResolutionList = streamInfo.ResolutionList.filter(
-                            (element: ResolutionInfo) => videoCodecFamily(element.Codecs) === 'avc',
-                        );
-                        // Fire when ANY enhanced variant (HEVC or AV1) is present and we have a decodable (AVC)
-                        // target. Adding av0 here fixes native-AV1 streams that previously never triggered a
-                        // swap and played AV1 straight into the ad-break black screen.
-                        if (
-                            state.AlwaysReloadPlayerOnAd ||
-                            (decodableResolutionList.length > 0 &&
-                                streamInfo.ResolutionList.some((element: ResolutionInfo) =>
-                                    isEnhancedCodec(element.Codecs),
-                                ) &&
-                                !state.SkipPlayerReloadOnHevc)
-                        ) {
-                            // Replace OR append a STREAM-INF attribute (replace if present, append after a comma if absent).
-                            // Used below to copy AUDIO/VIDEO/SUBTITLES groups from the closest non-HEVC variant onto the
-                            // rewritten HEVC line, matching TTV-AB v6.7.5's parser fix.
-                            const replaceOrAppendStreamInfAttr: (line: string, key: string, value: unknown) => string =
-                                (line, key, value) => {
-                                    if (typeof value !== 'string' || !value) return line;
-                                    const escaped = value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-                                    const next = key + '="' + escaped + '"';
-                                    const pattern = new RegExp('(^|,)' + key + '=("[^"]*"|[^,]*)');
-                                    return pattern.test(line) ? line.replace(pattern, '$1' + next) : line + ',' + next;
-                                };
-                            if (decodableResolutionList.length > 0) {
-                                for (let i = 0; i < lines.length - 1; i++) {
-                                    if (lines[i].startsWith('#EXT-X-STREAM-INF')) {
-                                        const resSettings = parseAttributes(lines[i]);
-                                        if (isEnhancedCodec(resSettings['CODECS'])) {
-                                            const oldResolution = resSettings['RESOLUTION'];
-                                            const targetArea = resolutionArea(oldResolution);
-                                            let newResolutionInfo = null;
-                                            let closestDiff = Infinity;
-                                            for (let j = 0; j < decodableResolutionList.length; j++) {
-                                                const candidate = decodableResolutionList[j];
-                                                const diff = Math.abs(
-                                                    resolutionArea(candidate.Resolution) - targetArea,
-                                                );
-                                                if (diff < closestDiff) {
-                                                    closestDiff = diff;
-                                                    newResolutionInfo = candidate;
-                                                }
-                                            }
-                                            if (!newResolutionInfo) continue; // unreachable: decodableResolutionList is non-empty here
-                                            console.log(
-                                                'ModifiedM3U8 swap ' +
-                                                    resSettings['CODECS'] +
-                                                    ' to ' +
-                                                    newResolutionInfo.Codecs +
-                                                    ' oldRes:' +
-                                                    oldResolution +
-                                                    ' newRes:' +
-                                                    newResolutionInfo.Resolution,
-                                            );
-                                            lines[i] = lines[i].replace(
-                                                /CODECS="[^"]+"/,
-                                                `CODECS="${newResolutionInfo.Codecs}"`,
-                                            );
-                                            // Copy media-group attributes from the closest non-HEVC variant so the
-                                            // rewritten line references audio/video/subtitle tracks the AVC backup
-                                            // actually carries. TTV-AB v6.7.5 parser fix.
-                                            lines[i] = replaceOrAppendStreamInfAttr(
-                                                lines[i],
-                                                'AUDIO',
-                                                newResolutionInfo.Audio,
-                                            );
-                                            lines[i] = replaceOrAppendStreamInfAttr(
-                                                lines[i],
-                                                'VIDEO',
-                                                newResolutionInfo.Video,
-                                            );
-                                            lines[i] = replaceOrAppendStreamInfAttr(
-                                                lines[i],
-                                                'SUBTITLES',
-                                                newResolutionInfo.Subtitles,
-                                            );
-                                            lines[i + 1] = newResolutionInfo.Url + ' '.repeat(i + 1); // The stream doesn't load unless each url line is unique
-                                        }
-                                    }
-                                }
-                            }
-                            streamInfo.ModifiedM3U8 = lines.join('\n');
-                        }
+                        streamInfo.ModifiedM3U8 = buildAvcOnlyMaster(encodingsM3u8, resolutionList);
                     }
                     streamInfo.LastSeenAt = Date.now();
                     // Note: do NOT set streamInfo.LastPlayerReload here. It was previously

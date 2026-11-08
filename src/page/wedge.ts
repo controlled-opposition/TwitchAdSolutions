@@ -24,7 +24,7 @@ export type WedgeWatch =
           actions: number;
       };
 
-export type WedgeStep =
+type WedgeStep =
     | { action: 'none' }
     | { action: 'nudge' | 'reload'; time: number; elapsed: number; framesDelta: number };
 

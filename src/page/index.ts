@@ -97,9 +97,7 @@ function main() {
     hookFetch();
     // Hook XHR to detect CSAI ad requests that bypass fetch
     hookXhr();
-    if (state.PlayerBufferingFix) {
-        monitorPlayerBuffering();
-    }
+    monitorPlayerBuffering();
     if (document.readyState === 'complete' || document.readyState === 'interactive') {
         onContentLoaded();
     } else {

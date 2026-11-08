@@ -18,7 +18,7 @@ export interface StallLadder {
 
 export type StallObservation = 'frozen' | 'healthy' | 'hold';
 
-export interface StallStep {
+interface StallStep {
     action: 'none' | 'pause-play' | 'reload';
     /** Set when the ladder wanted to escalate but the reload cap held it at pause/play. */
     capped: boolean;

@@ -138,9 +138,7 @@ async function handleAdPoll(
     }
     // AV1 parity: the ModifiedM3U8 build covers AV1 ('av0*') as well as hev/hvc.
     const isEnhanced = isEnhancedCodec(currentResolution.Codecs);
-    const codecSwapStarted =
-        ((isEnhanced && !state.SkipPlayerReloadOnHevc) || state.AlwaysReloadPlayerOnAd) &&
-        maybeStartCodecSwap(streamInfo, brk);
+    const codecSwapStarted = isEnhanced && maybeStartCodecSwap(streamInfo, brk);
     // Sticky CSAI escape hatch (PreferLowQualityBackup): if the sticky path has
     // been stuck in all-stripped state for too long (~8s), fall through to backup
     // search. Gives heavy-SSAI channels a way out of the sticky freeze by trying
@@ -335,14 +333,18 @@ function decideAutoplayFirst(streamInfo: StreamInfo): boolean {
     return true;
 }
 
-interface BackupFound {
+/** A backup variant playlist fetched for one player type. */
+interface BackupPlaylist {
     playerType: PlayerType;
     m3u8: string;
+    /** CODECS of the backup variant served. */
+    codecs: string;
+}
+
+interface BackupFound extends BackupPlaylist {
     searchStartedAt: number;
     /** Cold-cache token round-trips this search (0 = warm, encodings cache hit). */
     coldTokenFetches: number;
-    /** CODECS of the backup variant served. */
-    codecs: string;
 }
 
 // Look for an ad-free backup playlist across player types. Falls back to an ad-laden one only
@@ -355,11 +357,9 @@ async function searchBackup(
 ): Promise<BackupFound | null> {
     const backupSearchStart = Date.now();
     let backupColdTokenFetches = 0;
-    let backupPlayerType: PlayerType | null = null;
-    let backupM3u8: string | null = null;
-    let backupCodecs = '';
-    let fallbackM3u8 = null;
-    let fallbackCodecs = '';
+    let found: BackupPlaylist | null = null;
+    /** The last playlist fetched for state.FallbackPlayerType this search. */
+    let fallback: BackupPlaylist | null = null;
     let startIndex = 0;
     let isDoingMinimalRequests = false;
     if (streamInfo.LastPlayerReload > Date.now() - state.PlayerReloadMinimalRequestsTime) {
@@ -368,11 +368,7 @@ async function searchBackup(
         isDoingMinimalRequests = true;
     }
     const playerTypesToTry = backupOrder(streamInfo, brk);
-    for (
-        let playerTypeIndex = startIndex;
-        !backupM3u8 && playerTypeIndex < playerTypesToTry.length;
-        playerTypeIndex++
-    ) {
+    for (let playerTypeIndex = startIndex; !found && playerTypeIndex < playerTypesToTry.length; playerTypeIndex++) {
         const playerType = playerTypesToTry[playerTypeIndex];
         const failedAt = brk.FailedBackupPlayerTypes.get(playerType);
         // 5s (was 15s): in the CSAI-flip world a contaminated backup type can
@@ -382,6 +378,7 @@ async function searchBackup(
         if (failedAt && Date.now() - failedAt < 5000) {
             continue;
         }
+        const isLastType = playerTypeIndex >= playerTypesToTry.length - 1;
         for (let i = 0; i < 2; i++) {
             // This caches the m3u8 if it doesn't have ads. If the already existing cache has ads it fetches a new version (second loop)
             let isFreshM3u8 = false;
@@ -389,164 +386,55 @@ async function searchBackup(
             if (!encodingsM3u8) {
                 isFreshM3u8 = true;
                 backupColdTokenFetches++;
-                try {
-                    const accessTokenResponse = await getAccessToken(streamInfo.ChannelName, playerType);
-                    if (accessTokenResponse.status === 200) {
-                        const accessToken = await accessTokenResponse.json();
-                        // Twitch returns streamPlaybackAccessToken in two observed shapes:
-                        //   { data: { streamPlaybackAccessToken: {...} } } (most player types)
-                        //   { streamPlaybackAccessToken: {...} } (flatter, observed for 'embed')
-                        // Accept either. Field-observed silently dropping embed backup otherwise.
-                        const spat =
-                            accessToken?.data?.streamPlaybackAccessToken || accessToken?.streamPlaybackAccessToken;
-                        if (!spat) {
-                            const errInfo = accessToken?.errors
-                                ? ' errors: ' + JSON.stringify(accessToken.errors).substring(0, 300)
-                                : '';
-                            console.log(
-                                '[AD DEBUG] GQL response missing streamPlaybackAccessToken for ' +
-                                    playerType +
-                                    '. Response keys: ' +
-                                    JSON.stringify(Object.keys(accessToken || {})) +
-                                    errInfo,
-                            );
-                            recordTokenFetchFailure(streamInfo, brk, playerType);
-                            continue;
-                        }
-                        const urlInfo = new URL(
-                            'https://usher.ttvnw.net/api/' +
-                                (state.V2API ? 'v2/' : '') +
-                                'channel/hls/' +
-                                streamInfo.ChannelName +
-                                '.m3u8' +
-                                streamInfo.UsherParams,
-                        );
-                        urlInfo.searchParams.set('sig', spat.signature);
-                        urlInfo.searchParams.set('token', spat.value);
-                        const encodingsM3u8Response = await realFetch(urlInfo.href);
-                        if (encodingsM3u8Response.status === 200) {
-                            encodingsM3u8 = streamInfo.BackupEncodingsM3U8Cache[playerType] =
-                                await encodingsM3u8Response.text();
-                            // Reset detection diagnostic counter on success — token fetched, m3u8 fetched.
-                            streamInfo.ConsecutiveTokenFetchFailures = 0;
-                            streamInfo.LoggedTokenFailureStreak = false;
-                        } else {
-                            console.log('[AD DEBUG] Usher HTTP ' + encodingsM3u8Response.status + ' for ' + playerType);
-                        }
-                    } else {
-                        let errorBody = '';
-                        try {
-                            errorBody = ' — ' + (await accessTokenResponse.text()).substring(0, 200);
-                        } catch {}
-                        console.log(
-                            '[AD DEBUG] Access token HTTP ' +
-                                accessTokenResponse.status +
-                                ' for ' +
-                                playerType +
-                                (accessTokenResponse.status === 403
-                                    ? ' (integrity: ' + (state.ClientIntegrityHeader ? 'present' : 'missing') + ')'
-                                    : '') +
-                                errorBody,
-                        );
-                        recordTokenFetchFailure(streamInfo, brk, playerType);
-                    }
-                } catch (err) {
-                    console.log('[AD DEBUG] Access token failed for ' + playerType + ': ' + (err as Error).message);
-                    recordTokenFetchFailure(streamInfo, brk, playerType);
+                const fetched = await fetchBackupEncodings(streamInfo, brk, playerType, realFetch);
+                if (fetched === 'missing-token') {
+                    // Skips the cache reset and the fresh-fetch break below, so the next pass
+                    // fetches a token for this type again.
+                    continue;
                 }
+                encodingsM3u8 = fetched;
             }
-            if (encodingsM3u8) {
-                try {
-                    const variant = getStreamVariantForResolution(encodingsM3u8, currentResolution);
-                    const streamM3u8Url = variant?.url;
-                    if (!variant || !streamM3u8Url) {
-                        // Previously fetch(null), which threw on the blob-relative URL; same catch below, clearer message.
-                        throw new Error('no variant playlist in the backup encodings');
+            const candidate = encodingsM3u8
+                ? await fetchBackupPlaylist(encodingsM3u8, playerType, currentResolution, realFetch)
+                : null;
+            if (candidate) {
+                if (playerType === state.FallbackPlayerType) {
+                    fallback = candidate;
+                }
+                const backupHasAds = hasAdTags(candidate.m3u8);
+                if (
+                    (!backupHasAds &&
+                        (state.SimulatedAdsDepth === 0 || playerTypeIndex >= state.SimulatedAdsDepth - 1)) ||
+                    (!fallback && isLastType)
+                ) {
+                    if (brk.ConsecutiveAllStrippedPolls >= 1 && !backupHasAds) {
+                        noteCleanDuringFreeze(brk, playerType);
                     }
-                    const streamM3u8Response = await realFetch(streamM3u8Url);
-                    if (streamM3u8Response.status === 200) {
-                        const m3u8Text = await streamM3u8Response.text();
-                        if (m3u8Text) {
-                            if (playerType === state.FallbackPlayerType) {
-                                fallbackM3u8 = m3u8Text;
-                                fallbackCodecs = variant.codecs;
-                            }
-                            const backupHasAds = hasAdTags(m3u8Text);
-                            if (
-                                (!backupHasAds &&
-                                    (state.SimulatedAdsDepth === 0 ||
-                                        playerTypeIndex >= state.SimulatedAdsDepth - 1)) ||
-                                (!fallbackM3u8 && playerTypeIndex >= playerTypesToTry.length - 1)
-                            ) {
-                                if (brk.ConsecutiveAllStrippedPolls >= 1 && !backupHasAds) {
-                                    const prevType = brk.LastCommittedBackupPlayerType;
-                                    if (prevType && prevType !== playerType) {
-                                        console.log(
-                                            '[AD DEBUG] Cycle switched to different clean type (' +
-                                                playerType +
-                                                ', was ' +
-                                                prevType +
-                                                ') during freeze — recovered without reload',
-                                        );
-                                        // Only mark as cycle-rescued when we ACTUALLY switched player types.
-                                        // Natural recovery (same type became clean) still needs the end-of-break
-                                        // reload to refresh the player buffer — skipping it leaves the player
-                                        // stuck with low buffer and the buffer monitor unable to recover.
-                                        brk.CycleRescued = true;
-                                    } else {
-                                        console.log(
-                                            '[AD DEBUG] Same backup type (' +
-                                                playerType +
-                                                ') became clean during freeze — natural recovery',
-                                        );
-                                    }
-                                }
-                                backupPlayerType = playerType;
-                                backupM3u8 = m3u8Text;
-                                backupCodecs = variant.codecs;
-                                break;
-                            }
-                            if (backupHasAds) {
-                                if (!brk.ContaminatedTypes.has(playerType)) {
-                                    brk.ContaminatedTypes.add(playerType);
-                                    console.log('[AD DEBUG] Backup stream (' + playerType + ') also has ads');
-                                }
-                            }
-                            if (isDoingMinimalRequests) {
-                                backupPlayerType = playerType;
-                                backupM3u8 = m3u8Text;
-                                backupCodecs = variant.codecs;
-                                break;
-                            }
-                            // Cycle through all player types looking for a clean backup. Only commit
-                            // an ad-laden backup as a last resort when we've exhausted all options.
-                            // PR #89 previously committed the first ad-laden type immediately — that
-                            // caused the v58 freeze regression (issue #112) because the strip+recovery
-                            // loop would engage even when a clean alternate was available on another
-                            // player type.
-                            if (backupHasAds && playerTypeIndex >= playerTypesToTry.length - 1) {
-                                console.log(
-                                    '[AD DEBUG] All backup player types ad-laden — taking ' +
-                                        playerType +
-                                        ' as last-resort fallback (strip+recovery path will engage)',
-                                );
-                                backupPlayerType = playerType;
-                                backupM3u8 = m3u8Text;
-                                backupCodecs = variant.codecs;
-                                break;
-                            }
-                        }
-                    } else {
-                        console.log(
-                            '[AD DEBUG] Backup stream fetch failed for ' +
-                                playerType +
-                                ' (status ' +
-                                streamM3u8Response.status +
-                                ')',
-                        );
-                    }
-                } catch (err) {
-                    console.log('[AD DEBUG] Backup stream error for ' + playerType + ': ' + (err as Error).message);
+                    found = candidate;
+                    break;
+                }
+                if (backupHasAds && !brk.ContaminatedTypes.has(playerType)) {
+                    brk.ContaminatedTypes.add(playerType);
+                    console.log('[AD DEBUG] Backup stream (' + playerType + ') also has ads');
+                }
+                if (isDoingMinimalRequests) {
+                    found = candidate;
+                    break;
+                }
+                // Cycle through all player types looking for a clean backup. Only commit
+                // an ad-laden backup as a last resort when we've exhausted all options.
+                // PR #89 previously committed the first ad-laden type immediately — that
+                // caused the v58 freeze regression (issue #112) because the strip+recovery
+                // loop would engage even when a clean alternate was available on another
+                // player type.
+                if (backupHasAds && isLastType) {
+                    console.log(
+                        '[AD DEBUG] All backup player types ad-laden — taking ' +
+                            playerType +
+                            ' as last-resort fallback (strip+recovery path will engage)',
+                    );
+                    found = candidate;
+                    break;
                 }
             }
             streamInfo.BackupEncodingsM3U8Cache[playerType] = null;
@@ -555,9 +443,9 @@ async function searchBackup(
             }
         }
     }
-    if (!backupM3u8 && fallbackM3u8) {
+    if (!found && fallback) {
         // Don't fall back to a type already marked contaminated this break: we'd silently
-        // re-commit the same ad-laden playlist on every poll. Better to leave backupM3u8 null
+        // re-commit the same ad-laden playlist on every poll. Better to return null
         // and let the "No ad-free backup stream found" log fire so it's visible.
         if (brk.ContaminatedTypes.has(state.FallbackPlayerType)) {
             console.log(
@@ -568,25 +456,149 @@ async function searchBackup(
                     ' all ad-laden)',
             );
         } else {
-            backupPlayerType = state.FallbackPlayerType;
-            backupM3u8 = fallbackM3u8;
-            backupCodecs = fallbackCodecs;
+            found = fallback;
         }
     }
-    if (backupM3u8 && backupPlayerType) {
-        return {
-            playerType: backupPlayerType,
-            m3u8: backupM3u8,
-            searchStartedAt: backupSearchStart,
-            coldTokenFetches: backupColdTokenFetches,
-            codecs: backupCodecs,
-        };
+    if (found) {
+        return { ...found, searchStartedAt: backupSearchStart, coldTokenFetches: backupColdTokenFetches };
     }
     console.log(
         '[AD DEBUG] No ad-free backup stream found — ads may leak. Tried: ' +
             playerTypesToTry.slice(startIndex).join(', '),
     );
     return null;
+}
+
+// Access token + usher fetch of a player type's encodings (master) playlist, cached on success.
+// 'missing-token' when GQL answered 200 without a token, null on any other failure.
+async function fetchBackupEncodings(
+    streamInfo: StreamInfo,
+    brk: AdBreak,
+    playerType: PlayerType,
+    realFetch: typeof fetch,
+): Promise<string | null | 'missing-token'> {
+    try {
+        const accessTokenResponse = await getAccessToken(streamInfo.ChannelName, playerType);
+        if (accessTokenResponse.status !== 200) {
+            let errorBody = '';
+            try {
+                errorBody = ' — ' + (await accessTokenResponse.text()).substring(0, 200);
+            } catch {}
+            console.log(
+                '[AD DEBUG] Access token HTTP ' +
+                    accessTokenResponse.status +
+                    ' for ' +
+                    playerType +
+                    (accessTokenResponse.status === 403
+                        ? ' (integrity: ' + (state.ClientIntegrityHeader ? 'present' : 'missing') + ')'
+                        : '') +
+                    errorBody,
+            );
+            recordTokenFetchFailure(streamInfo, brk, playerType);
+            return null;
+        }
+        const accessToken = await accessTokenResponse.json();
+        // Twitch returns streamPlaybackAccessToken in two observed shapes:
+        //   { data: { streamPlaybackAccessToken: {...} } } (most player types)
+        //   { streamPlaybackAccessToken: {...} } (flatter, observed for 'embed')
+        // Accept either. Field-observed silently dropping embed backup otherwise.
+        const spat = accessToken?.data?.streamPlaybackAccessToken || accessToken?.streamPlaybackAccessToken;
+        if (!spat) {
+            const errInfo = accessToken?.errors
+                ? ' errors: ' + JSON.stringify(accessToken.errors).substring(0, 300)
+                : '';
+            console.log(
+                '[AD DEBUG] GQL response missing streamPlaybackAccessToken for ' +
+                    playerType +
+                    '. Response keys: ' +
+                    JSON.stringify(Object.keys(accessToken || {})) +
+                    errInfo,
+            );
+            recordTokenFetchFailure(streamInfo, brk, playerType);
+            return 'missing-token';
+        }
+        const urlInfo = new URL(
+            'https://usher.ttvnw.net/api/' +
+                (state.V2API ? 'v2/' : '') +
+                'channel/hls/' +
+                streamInfo.ChannelName +
+                '.m3u8' +
+                streamInfo.UsherParams,
+        );
+        urlInfo.searchParams.set('sig', spat.signature);
+        urlInfo.searchParams.set('token', spat.value);
+        const encodingsM3u8Response = await realFetch(urlInfo.href);
+        if (encodingsM3u8Response.status !== 200) {
+            console.log('[AD DEBUG] Usher HTTP ' + encodingsM3u8Response.status + ' for ' + playerType);
+            return null;
+        }
+        const encodingsM3u8 = await encodingsM3u8Response.text();
+        streamInfo.BackupEncodingsM3U8Cache[playerType] = encodingsM3u8;
+        // Reset detection diagnostic counter on success — token fetched, m3u8 fetched.
+        streamInfo.ConsecutiveTokenFetchFailures = 0;
+        streamInfo.LoggedTokenFailureStreak = false;
+        return encodingsM3u8;
+    } catch (err) {
+        console.log('[AD DEBUG] Access token failed for ' + playerType + ': ' + (err as Error).message);
+        recordTokenFetchFailure(streamInfo, brk, playerType);
+        return null;
+    }
+}
+
+// The variant of a backup's encodings playlist closest to the player's resolution, fetched.
+// Null (logged) when the fetch fails or the playlist is empty.
+async function fetchBackupPlaylist(
+    encodingsM3u8: string,
+    playerType: PlayerType,
+    currentResolution: ResolutionInfo,
+    realFetch: typeof fetch,
+): Promise<BackupPlaylist | null> {
+    try {
+        const variant = getStreamVariantForResolution(encodingsM3u8, currentResolution);
+        const streamM3u8Url = variant?.url;
+        if (!variant || !streamM3u8Url) {
+            // Previously fetch(null), which threw on the blob-relative URL; same catch below, clearer message.
+            throw new Error('no variant playlist in the backup encodings');
+        }
+        const streamM3u8Response = await realFetch(streamM3u8Url);
+        if (streamM3u8Response.status !== 200) {
+            console.log(
+                '[AD DEBUG] Backup stream fetch failed for ' +
+                    playerType +
+                    ' (status ' +
+                    streamM3u8Response.status +
+                    ')',
+            );
+            return null;
+        }
+        const m3u8 = await streamM3u8Response.text();
+        return m3u8 ? { playerType, m3u8, codecs: variant.codecs } : null;
+    } catch (err) {
+        console.log('[AD DEBUG] Backup stream error for ' + playerType + ': ' + (err as Error).message);
+        return null;
+    }
+}
+
+// A backup poll during an all-stripped freeze found a clean type: log how it recovered, and mark
+// the break cycle-rescued when that took a switch of player type.
+function noteCleanDuringFreeze(brk: AdBreak, playerType: PlayerType): void {
+    const prevType = brk.LastCommittedBackupPlayerType;
+    if (prevType && prevType !== playerType) {
+        console.log(
+            '[AD DEBUG] Cycle switched to different clean type (' +
+                playerType +
+                ', was ' +
+                prevType +
+                ') during freeze — recovered without reload',
+        );
+        // Only mark as cycle-rescued when we ACTUALLY switched player types.
+        // Natural recovery (same type became clean) still needs the end-of-break
+        // reload to refresh the player buffer — skipping it leaves the player
+        // stuck with low buffer and the buffer monitor unable to recover.
+        brk.CycleRescued = true;
+    } else {
+        console.log('[AD DEBUG] Same backup type (' + playerType + ') became clean during freeze — natural recovery');
+    }
 }
 
 // Serve a backup for this poll, and on a switch of player type update pinning and the

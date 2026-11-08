@@ -135,7 +135,6 @@ export interface StreamInfo {
     UsherParams: string;
     // Resolutions / URL map
     Urls: Record<string, ResolutionInfo>;
-    ResolutionList: ResolutionInfo[];
     // Codec swap
     ModifiedM3U8: string | null;
     CodecSwap: CodecSwapState;
@@ -258,7 +257,7 @@ export type WorkerToPageMessage =
     | AdBlockBannerMessage
     | { key: 'PauseResumePlayer' }
     /** `requestId` asks the page to answer with a ReloadResult. */
-    | { key: 'ReloadPlayer'; kind?: ReloadKind; requestId?: number }
+    | { key: 'ReloadPlayer'; kind: ReloadKind; requestId?: number }
     | { key: 'FetchRequest'; value: WorkerFetchRequest };
 
 /** Page -> worker message keys and the type of each message's `value`. */

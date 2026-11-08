@@ -60,7 +60,7 @@ const {
     parseAttributes,
     getServerTimeFromM3u8,
     replaceServerTimeInM3u8,
-    getStreamUrlForResolution,
+    getStreamVariantForResolution,
 } = vaft;
 // stripAdSegments works on a break; give the StreamInfo one if it has none.
 const stripAdSegments = (text, stripAll, si) => {
@@ -182,9 +182,9 @@ assert(replaceServerTimeInM3u8(m3u8V2, '9999999999.000').includes('VALUE="999999
 vaft.state.V2API = false;
 
 // ============================================================
-// Test: getStreamUrlForResolution
+// Test: getStreamVariantForResolution
 // ============================================================
-console.log('--- getStreamUrlForResolution ---');
+console.log('--- getStreamVariantForResolution ---');
 const encodingsM3u8 = [
     '#EXTM3U',
     '#EXT-X-STREAM-INF:BANDWIDTH=6000000,RESOLUTION=1920x1080,CODECS="avc1.4D4028",FRAME-RATE=30.0',
@@ -198,22 +198,22 @@ const encodingsM3u8 = [
 ].join('\n');
 
 assertEq(
-    getStreamUrlForResolution(encodingsM3u8, { Resolution: '1920x1080', FrameRate: 30 }),
+    getStreamVariantForResolution(encodingsM3u8, { Resolution: '1920x1080', FrameRate: 30 })?.url,
     'https://video.twitch.tv/1080p30.m3u8',
     'exact resolution + framerate match',
 );
 assertEq(
-    getStreamUrlForResolution(encodingsM3u8, { Resolution: '1280x720', FrameRate: 60 }),
+    getStreamVariantForResolution(encodingsM3u8, { Resolution: '1280x720', FrameRate: 60 })?.url,
     'https://video.twitch.tv/720p60.m3u8',
     'exact 720p60 match',
 );
 assertEq(
-    getStreamUrlForResolution(encodingsM3u8, { Resolution: '1280x720', FrameRate: 30 }),
+    getStreamVariantForResolution(encodingsM3u8, { Resolution: '1280x720', FrameRate: 30 })?.url,
     'https://video.twitch.tv/720p60.m3u8',
     'resolution match without framerate match returns closest',
 );
 assert(
-    getStreamUrlForResolution(encodingsM3u8, { Resolution: '1600x900', FrameRate: 30 }) != null,
+    getStreamVariantForResolution(encodingsM3u8, { Resolution: '1600x900', FrameRate: 30 }) != null,
     'non-exact resolution returns closest match',
 );
 
@@ -465,16 +465,16 @@ assert(hasAdTags('twitch-stitched') === true, 'detects twitch-stitched prefix al
 assert(hasAdTags('EXT-X-DATERANGE:CLASS="twitch-maf-ad"') === true, 'detects twitch-maf-ad DATERANGE alone');
 
 // ============================================================
-// Test: getStreamUrlForResolution — edge cases
+// Test: getStreamVariantForResolution — edge cases
 // ============================================================
-console.log('--- getStreamUrlForResolution (edge cases) ---');
+console.log('--- getStreamVariantForResolution (edge cases) ---');
 assertEq(
-    getStreamUrlForResolution('#EXTM3U\n', { Resolution: '1920x1080', FrameRate: 30 }),
+    getStreamVariantForResolution('#EXTM3U\n', { Resolution: '1920x1080', FrameRate: 30 })?.url ?? null,
     null,
     'returns null for empty m3u8',
 );
 assertEq(
-    getStreamUrlForResolution('', { Resolution: '1920x1080', FrameRate: 30 }),
+    getStreamVariantForResolution('', { Resolution: '1920x1080', FrameRate: 30 })?.url ?? null,
     null,
     'returns null for empty string',
 );
@@ -835,9 +835,9 @@ asyncTests.push(async () => {
     assertEq(pick('av01.0.08M.08'), 'https://b/av1-1440.m3u8', 'same family preferred over exact resolution');
     assertEq(pick(undefined), 'https://b/hevc1080.m3u8', 'no codec given: first resolution match, as before');
     assertEq(
-        pl.getStreamUrlForResolution(enc, { Resolution: '1920x1080', FrameRate: 60 }),
+        pl.getStreamVariantForResolution(enc, { Resolution: '1920x1080', FrameRate: 60 })?.url,
         'https://b/hevc1080.m3u8',
-        'getStreamUrlForResolution unchanged without a codec',
+        'getStreamVariantForResolution without a codec',
     );
     assert(pl.isCodecMismatch('hev1.1', 'avc1.64'), 'HEVC player, AVC backup: mismatch');
     assert(pl.isCodecMismatch('avc1.64', 'hev1.1'), 'AVC player, HEVC backup: mismatch (the missing direction)');

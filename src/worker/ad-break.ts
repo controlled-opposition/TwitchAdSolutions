@@ -62,7 +62,7 @@ export function onAdPoll(brk: AdBreak): void {
 }
 
 /** Why a break ended, or null while it goes on. */
-export type BreakEndReason = 'clean-polls' | 'no-live-segments' | 'max-wait';
+type BreakEndReason = 'clean-polls' | 'no-live-segments' | 'max-wait';
 
 /**
  * An ad-free poll during a break. Returns why the break ends on this poll, or null.
@@ -84,7 +84,7 @@ export function onAdFreePoll(brk: AdBreak, hasLiveSegments: boolean): BreakEndRe
 }
 
 /** What to do with the player when a break ends. */
-export type BreakEndAction =
+type BreakEndAction =
     | { action: 'reload'; kind: 'early' | 'post-ad'; reason: string }
     | { action: 'pause-play' }
     | { action: 'none' };
@@ -141,6 +141,6 @@ export function decideBreakEndAction(
  * A freeze of at most 2 polls (~4s) was ended by switching to a different clean backup, with no
  * early reload: the player is on a healthy backup, and reloading only costs a loading circle.
  */
-export function cycleRescuedCleanly(brk: AdBreak): boolean {
+function cycleRescuedCleanly(brk: AdBreak): boolean {
     return brk.CycleRescued && brk.TotalAllStrippedPolls <= 2 && brk.EarlyReloadCount === 0;
 }

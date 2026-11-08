@@ -21,7 +21,7 @@ interface Catchup {
 let catchup: Catchup | null = null;
 
 /** Back to idle: stop the timers and return the tracked element (and the current one) to 1×. */
-function finish() {
+export function cancelDriftCorrection() {
     if (!catchup) return;
     const { element, interval, timeout } = catchup;
     catchup = null;
@@ -40,7 +40,7 @@ function finish() {
 
 export function startDriftCorrection(videoElement: HTMLVideoElement) {
     if (state.DriftCorrectionRate <= 1) return;
-    finish();
+    cancelDriftCorrection();
     videoElement.playbackRate = state.DriftCorrectionRate;
     console.log('[AD DEBUG] Drift correction: catching up at ' + state.DriftCorrectionRate + 'x');
     const interval = setInterval(() => {
@@ -49,18 +49,15 @@ export function startDriftCorrection(videoElement: HTMLVideoElement) {
             if (vid && vid.buffered.length > 0) {
                 if (vid.buffered.end(vid.buffered.length - 1) - vid.currentTime <= CAUGHT_UP_S) {
                     console.log('[AD DEBUG] Drift correction complete — resumed normal playback speed');
-                    finish();
+                    cancelDriftCorrection();
                 }
             }
         } catch {
-            finish();
+            cancelDriftCorrection();
         }
     }, CHECK_INTERVAL_MS);
-    const timeout = setTimeout(finish, SAFETY_TIMEOUT_MS);
+    const timeout = setTimeout(cancelDriftCorrection, SAFETY_TIMEOUT_MS);
     catchup = { element: videoElement, interval, timeout };
 }
 
 /** Stop any drift catch-up in progress and return to normal speed (no-op when none is running). */
-export function cancelDriftCorrection() {
-    finish();
-}

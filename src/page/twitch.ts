@@ -6,14 +6,14 @@
 type ReactInstance = any;
 
 /** A React fiber node. */
-export interface ReactFiber {
+interface ReactFiber {
     stateNode?: ReactInstance;
     child?: ReactFiber | null;
     sibling?: ReactFiber | null;
 }
 
 /** The #root element, carrying React's internal container properties. */
-export type ReactRootElement = Element & {
+type ReactRootElement = Element & {
     _reactRootContainer?: { _internalRoot?: { current?: ReactFiber } };
     // biome-ignore lint/suspicious/noExplicitAny: React's __reactContainer$<random> / __reactFiber$<random> keys
     [key: string]: any;

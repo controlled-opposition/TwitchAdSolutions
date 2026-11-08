@@ -8,7 +8,7 @@ let nextRequestId = 1;
 const pendingReloads = new Map<number, (outcome: ReloadOutcome) => void>();
 
 /** Ask the page to reload the player. Returns the request id (0 when no answer was asked for). */
-export function requestReload(kind: ReloadKind | undefined, onOutcome?: (outcome: ReloadOutcome) => void): number {
+export function requestReload(kind: ReloadKind, onOutcome?: (outcome: ReloadOutcome) => void): number {
     if (!onOutcome) {
         postToPage({ key: 'ReloadPlayer', kind });
         return 0;

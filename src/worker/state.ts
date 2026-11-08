@@ -47,8 +47,6 @@ function createWorkerState() {
             // autoplay variants don't transition cleanly back to main stream variants.
         ] as PlayerType[],
         FallbackPlayerType: 'site' as PlayerType, // was 'embed' — site is more reliable when all Source types end up ad-laden
-        SkipPlayerReloadOnHevc: false, // If true this will skip player reload on streams which have 2k/4k quality (if you enable this and you use the 2k/4k quality setting you'll get error #4000 / #3000 / spinning wheel on chrome based browsers). Despite the name, gates BOTH enhanced families (HEVC and AV1) since v68.5.3.
-        AlwaysReloadPlayerOnAd: false, // Always pause/play when entering/leaving ads
         PlayerReloadMinimalRequestsTime: 1500,
         PlayerReloadMinimalRequestsPlayerIndex: 2, //autoplay
         /** Channel name -> stream state. */

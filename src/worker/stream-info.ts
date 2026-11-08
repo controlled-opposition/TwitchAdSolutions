@@ -37,7 +37,6 @@ export function createStreamInfo(channelName: string, encodingsM3u8: string, ush
         UsherParams: usherParams,
         // Resolutions / URL map
         Urls: Object.create(null), // xxx.m3u8 -> { Resolution: "284x160", FrameRate: 30.0 }
-        ResolutionList: [],
         // Codec swap
         ModifiedM3U8: null,
         CodecSwap: 'native',

@@ -232,22 +232,14 @@
       // If true, buffer monitor reloads unlimited times (pre-v47 behavior, risk of cascade)
       DriftCorrectionRate: 1.1,
       // Playback rate for catching up to live edge after reload (0 = disable drift correction)
-      PlayerBufferingFix: true,
-      // If true this will pause/play the player when it gets stuck buffering
       PlayerBufferingDelay: 600,
       // How often should we check the player state (in milliseconds)
       PlayerBufferingSameStateCount: 3,
       // How many times of seeing the same player state until we trigger pause/play (it will only trigger it one time until the player state changes again)
       PlayerBufferingDangerZone: 0.5,
       // Lowered 1 → 0.5: at the live edge with thin-but-functional buffer (~0.7-0.95s), the AND check (positionFrozen + bufferDuration < DangerZone) was firing on real momentary stalls — but the pause/play "fix" interacts badly with Twitch's playback-monitor (snaps to "buffered region 0.04xxx"), creating a self-sustaining cascade where each fix degrades currentTime. Lower threshold confines firing to truly-drained buffer states (<0.5s) where intervention is unambiguously needed.
-      PlayerBufferingDoPlayerReload: false,
-      // If true this will do a player reload instead of pause/play (player reloading is better at fixing the playback issues but it takes slightly longer)
-      PlayerBufferingMinRepeatDelay: 8e3,
+      PlayerBufferingMinRepeatDelay: 8e3
       // Minimum delay (in milliseconds) between each pause/play (this is to avoid over pressing pause/play when there are genuine buffering problems)
-      PlayerBufferingPrerollCheckEnabled: false,
-      // Enable this if you're getting an immediate pause/play/reload as you open a stream (which is causing the stream to take longer to load). One problem with this being true is that it can cause the player to get stuck in some instances requiring the user to press pause/play
-      PlayerBufferingPrerollCheckOffset: 5
-      // How far the stream need to move before doing the buffering mitigation (depends on PlayerBufferingPrerollCheckEnabled being true)
     };
   }
   var state = createPageState();
@@ -287,7 +279,7 @@
   var SAFETY_TIMEOUT_MS = 3e4;
   var CAUGHT_UP_S = 1;
   var catchup = null;
-  function finish() {
+  function cancelDriftCorrection() {
     if (!catchup) return;
     const { element, interval, timeout } = catchup;
     catchup = null;
@@ -307,7 +299,7 @@
   }
   function startDriftCorrection(videoElement) {
     if (state.DriftCorrectionRate <= 1) return;
-    finish();
+    cancelDriftCorrection();
     videoElement.playbackRate = state.DriftCorrectionRate;
     console.log("[AD DEBUG] Drift correction: catching up at " + state.DriftCorrectionRate + "x");
     const interval = setInterval(() => {
@@ -316,18 +308,15 @@
         if (vid && vid.buffered.length > 0) {
           if (vid.buffered.end(vid.buffered.length - 1) - vid.currentTime <= CAUGHT_UP_S) {
             console.log("[AD DEBUG] Drift correction complete — resumed normal playback speed");
-            finish();
+            cancelDriftCorrection();
           }
         }
       } catch {
-        finish();
+        cancelDriftCorrection();
       }
     }, CHECK_INTERVAL_MS);
-    const timeout = setTimeout(finish, SAFETY_TIMEOUT_MS);
+    const timeout = setTimeout(cancelDriftCorrection, SAFETY_TIMEOUT_MS);
     catchup = { element: videoElement, interval, timeout };
-  }
-  function cancelDriftCorrection() {
-    finish();
   }
 
   // src/page/workers.ts
@@ -675,8 +664,7 @@
     }
     const playerRootDiv = cachedPlayerRootDiv;
     if (playerRootDiv != null) {
-      let adBlockDiv = null;
-      adBlockDiv = playerRootDiv.querySelector(".tas-adblock-overlay");
+      let adBlockDiv = playerRootDiv.querySelector(".tas-adblock-overlay");
       if (adBlockDiv == null) {
         adBlockDiv = document.createElement("div");
         adBlockDiv.className = "tas-adblock-overlay";
@@ -685,17 +673,15 @@
         adBlockDiv.P = adBlockDiv.querySelector("p");
         playerRootDiv.appendChild(adBlockDiv);
       }
-      if (adBlockDiv != null) {
-        if (adBlockDiv.P) {
-          const text = "Blocking" + (data.isMidroll ? " midroll" : "") + " ads" + (data.isStrippingAdSegments ? " (stripping)" : "") + (data.activeBackupPlayerType ? " (" + data.activeBackupPlayerType + ")" : "");
-          if (adBlockDiv.P.textContent !== text) {
-            adBlockDiv.P.textContent = text;
-          }
+      if (adBlockDiv.P) {
+        const text = "Blocking" + (data.isMidroll ? " midroll" : "") + " ads" + (data.isStrippingAdSegments ? " (stripping)" : "") + (data.activeBackupPlayerType ? " (" + data.activeBackupPlayerType + ")" : "");
+        if (adBlockDiv.P.textContent !== text) {
+          adBlockDiv.P.textContent = text;
         }
-        const display = data.hasAds && playerBufferState.isLive ? "block" : "none";
-        if (adBlockDiv.style.display !== display) {
-          adBlockDiv.style.display = display;
-        }
+      }
+      const display = data.hasAds && playerBufferState.isLive ? "block" : "none";
+      if (adBlockDiv.style.display !== display) {
+        adBlockDiv.style.display = display;
       }
       if (data.hasAds) {
         hideTwitchAdOverlays();
@@ -894,7 +880,7 @@
           "[AD DEBUG] Video state: readyState=" + video.readyState + " networkState=" + video.networkState + " buffered=" + (video.buffered.length > 0 ? video.buffered.end(video.buffered.length - 1).toFixed(1) : 0) + " currentTime=" + video.currentTime.toFixed(1) + " paused=" + video.paused
         );
       }
-      doTwitchPlayerTask(step.action === "reload" || state.PlayerBufferingDoPlayerReload ? "reload" : "pausePlay");
+      doTwitchPlayerTask(step.action === "reload" ? "reload" : "pausePlay");
       playerBufferState.lastFixTime = Date.now();
     }
     if (playerBufferState.position > 0 && position - playerBufferState.position > 5 && !playerBufferState.inAdBreak && !within(playerBufferState.lastBackupSwitchAt, BACKUP_SWITCH_GRACE_MS) && (!playerBufferState.lastDriftStartedAt || Date.now() - playerBufferState.lastDriftStartedAt >= 3e4)) {
@@ -915,7 +901,7 @@
       return "hold";
     }
     const positionFrozen = playerBufferState.position === position && (playerBufferState.videoCurrentTime === void 0 || playerBufferState.videoCurrentTime === videoCurrentTime);
-    const stalled = playerBufferState.hasStreamStarted && (!state.PlayerBufferingPrerollCheckEnabled || position > state.PlayerBufferingPrerollCheckOffset) && // AND, not OR: a real stall is BOTH frozen position AND a draining buffer. Field reports
+    const stalled = playerBufferState.hasStreamStarted && // AND, not OR: a real stall is BOTH frozen position AND a draining buffer. Field reports
     // on Firefox at live edge showed the OR form firing during normal thin-buffer breathing
     // (~1-2s buffered, currentTime briefly idle waiting on a segment fetch) — pause/play
     // would then knock the player back to readyState=1 and currentTime=0, snowballing into
@@ -1410,10 +1396,6 @@
       ],
       FallbackPlayerType: "site",
       // was 'embed' — site is more reliable when all Source types end up ad-laden
-      SkipPlayerReloadOnHevc: false,
-      // If true this will skip player reload on streams which have 2k/4k quality (if you enable this and you use the 2k/4k quality setting you'll get error #4000 / #3000 / spinning wheel on chrome based browsers). Despite the name, gates BOTH enhanced families (HEVC and AV1) since v68.5.3.
-      AlwaysReloadPlayerOnAd: false,
-      // Always pause/play when entering/leaving ads
       PlayerReloadMinimalRequestsTime: 1500,
       PlayerReloadMinimalRequestsPlayerIndex: 2,
       //autoplay
@@ -1851,17 +1833,11 @@
     const sameFamily = family === "unknown" ? [] : variants.filter((v) => videoCodecFamily(v.codecs) === family);
     const candidates = sameFamily.length > 0 ? sameFamily : variants;
     const targetArea = resolutionArea(resolutionInfo.Resolution);
-    let matched = null;
-    let matchedFrameRate = false;
     let closest = null;
     let closestDifference = Infinity;
     for (const v of candidates) {
-      if (v.resolution === resolutionInfo.Resolution && (!matched || !matchedFrameRate && v.frameRate === resolutionInfo.FrameRate)) {
-        matched = v;
-        matchedFrameRate = v.frameRate === resolutionInfo.FrameRate;
-        if (matchedFrameRate) {
-          return { url: v.url, codecs: v.codecs };
-        }
+      if (v.resolution === resolutionInfo.Resolution && v.frameRate === resolutionInfo.FrameRate) {
+        return { url: v.url, codecs: v.codecs };
       }
       const difference = Math.abs(resolutionArea(v.resolution) - targetArea);
       if (difference < closestDifference) {
@@ -1876,6 +1852,76 @@
       return videoCodecFamily(backupCodecs) !== videoCodecFamily(playerCodecs);
     }
     return isEnhancedCodec(backupCodecs);
+  }
+  function* parseMasterVariants(encodingsM3u8) {
+    const lines = encodingsM3u8.split(/\r?\n/);
+    for (let i = 0; i < lines.length - 1; i++) {
+      if (!lines[i].startsWith("#EXT-X-STREAM-INF") || !lines[i + 1].includes(".m3u8")) {
+        continue;
+      }
+      const attributes = parseAttributes(lines[i]);
+      const resolution = attributes["RESOLUTION"];
+      yield {
+        url: lines[i + 1],
+        resolution: resolution ? {
+          Resolution: resolution,
+          FrameRate: attributes["FRAME-RATE"],
+          // CODECS is optional on a STREAM-INF line; keep every field string-valued so
+          // readers can call string methods without a guard.
+          Codecs: attributes["CODECS"] || "",
+          // Copied onto the rewritten line by buildAvcOnlyMaster, so it references
+          // media groups the AVC variant carries (TTV-AB v6.7.5 parser fix).
+          Audio: attributes["AUDIO"] || "",
+          Video: attributes["VIDEO"] || "",
+          Subtitles: attributes["SUBTITLES"] || "",
+          Url: lines[i + 1]
+        } : null
+      };
+    }
+  }
+  function replaceOrAppendStreamInfAttr(line, key, value) {
+    if (typeof value !== "string" || !value) return line;
+    const escaped = value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    const next = key + '="' + escaped + '"';
+    const pattern = new RegExp("(^|,)" + key + '=("[^"]*"|[^,]*)');
+    return pattern.test(line) ? line.replace(pattern, "$1" + next) : line + "," + next;
+  }
+  function buildAvcOnlyMaster(encodingsM3u8, variants) {
+    const avcVariants = variants.filter((v) => videoCodecFamily(v.Codecs) === "avc");
+    if (avcVariants.length === 0 || !variants.some((v) => isEnhancedCodec(v.Codecs))) {
+      return null;
+    }
+    const lines = encodingsM3u8.split(/\r?\n/);
+    for (let i = 0; i < lines.length - 1; i++) {
+      if (!lines[i].startsWith("#EXT-X-STREAM-INF")) {
+        continue;
+      }
+      const attributes = parseAttributes(lines[i]);
+      if (!isEnhancedCodec(attributes["CODECS"])) {
+        continue;
+      }
+      const oldResolution = attributes["RESOLUTION"];
+      const targetArea = resolutionArea(oldResolution);
+      let target = null;
+      let closestDiff = Infinity;
+      for (const candidate of avcVariants) {
+        const diff = Math.abs(resolutionArea(candidate.Resolution) - targetArea);
+        if (diff < closestDiff) {
+          closestDiff = diff;
+          target = candidate;
+        }
+      }
+      if (!target) continue;
+      console.log(
+        "ModifiedM3U8 swap " + attributes["CODECS"] + " to " + target.Codecs + " oldRes:" + oldResolution + " newRes:" + target.Resolution
+      );
+      lines[i] = lines[i].replace(/CODECS="[^"]+"/, `CODECS="${target.Codecs}"`);
+      lines[i] = replaceOrAppendStreamInfAttr(lines[i], "AUDIO", target.Audio);
+      lines[i] = replaceOrAppendStreamInfAttr(lines[i], "VIDEO", target.Video);
+      lines[i] = replaceOrAppendStreamInfAttr(lines[i], "SUBTITLES", target.Subtitles);
+      lines[i + 1] = target.Url + " ".repeat(i + 1);
+    }
+    return lines.join("\n");
   }
 
   // src/worker/gql.ts
@@ -2142,7 +2188,7 @@
       return stripAdSegments(textStr, false, streamInfo, brk);
     }
     const isEnhanced = isEnhancedCodec(currentResolution.Codecs);
-    const codecSwapStarted = (isEnhanced && !state.SkipPlayerReloadOnHevc || state.AlwaysReloadPlayerOnAd) && maybeStartCodecSwap(streamInfo, brk);
+    const codecSwapStarted = isEnhanced && maybeStartCodecSwap(streamInfo, brk);
     if (state.PreferLowQualityBackup && brk.Path === "sticky-csai" && brk.ConsecutiveAllStrippedPolls >= STICKY_ESCAPE_POLLS) {
       const stuckPolls = brk.ConsecutiveAllStrippedPolls;
       const earlyReloadInfo = brk.EarlyReloadCount + "/" + Math.max(1, brk.PodLength);
@@ -2259,11 +2305,8 @@
   async function searchBackup(streamInfo, brk, currentResolution, realFetch) {
     const backupSearchStart = Date.now();
     let backupColdTokenFetches = 0;
-    let backupPlayerType = null;
-    let backupM3u8 = null;
-    let backupCodecs = "";
-    let fallbackM3u8 = null;
-    let fallbackCodecs = "";
+    let found = null;
+    let fallback = null;
     let startIndex = 0;
     let isDoingMinimalRequests = false;
     if (streamInfo.LastPlayerReload > Date.now() - state.PlayerReloadMinimalRequestsTime) {
@@ -2271,124 +2314,52 @@
       isDoingMinimalRequests = true;
     }
     const playerTypesToTry = backupOrder(streamInfo, brk);
-    for (let playerTypeIndex = startIndex; !backupM3u8 && playerTypeIndex < playerTypesToTry.length; playerTypeIndex++) {
+    for (let playerTypeIndex = startIndex; !found && playerTypeIndex < playerTypesToTry.length; playerTypeIndex++) {
       const playerType = playerTypesToTry[playerTypeIndex];
       const failedAt = brk.FailedBackupPlayerTypes.get(playerType);
       if (failedAt && Date.now() - failedAt < 5e3) {
         continue;
       }
+      const isLastType = playerTypeIndex >= playerTypesToTry.length - 1;
       for (let i = 0; i < 2; i++) {
         let isFreshM3u8 = false;
         let encodingsM3u8 = streamInfo.BackupEncodingsM3U8Cache[playerType];
         if (!encodingsM3u8) {
           isFreshM3u8 = true;
           backupColdTokenFetches++;
-          try {
-            const accessTokenResponse = await getAccessToken(streamInfo.ChannelName, playerType);
-            if (accessTokenResponse.status === 200) {
-              const accessToken = await accessTokenResponse.json();
-              const spat = accessToken?.data?.streamPlaybackAccessToken || accessToken?.streamPlaybackAccessToken;
-              if (!spat) {
-                const errInfo = accessToken?.errors ? " errors: " + JSON.stringify(accessToken.errors).substring(0, 300) : "";
-                console.log(
-                  "[AD DEBUG] GQL response missing streamPlaybackAccessToken for " + playerType + ". Response keys: " + JSON.stringify(Object.keys(accessToken || {})) + errInfo
-                );
-                recordTokenFetchFailure(streamInfo, brk, playerType);
-                continue;
-              }
-              const urlInfo = new URL(
-                "https://usher.ttvnw.net/api/" + (state.V2API ? "v2/" : "") + "channel/hls/" + streamInfo.ChannelName + ".m3u8" + streamInfo.UsherParams
-              );
-              urlInfo.searchParams.set("sig", spat.signature);
-              urlInfo.searchParams.set("token", spat.value);
-              const encodingsM3u8Response = await realFetch(urlInfo.href);
-              if (encodingsM3u8Response.status === 200) {
-                encodingsM3u8 = streamInfo.BackupEncodingsM3U8Cache[playerType] = await encodingsM3u8Response.text();
-                streamInfo.ConsecutiveTokenFetchFailures = 0;
-                streamInfo.LoggedTokenFailureStreak = false;
-              } else {
-                console.log("[AD DEBUG] Usher HTTP " + encodingsM3u8Response.status + " for " + playerType);
-              }
-            } else {
-              let errorBody = "";
-              try {
-                errorBody = " — " + (await accessTokenResponse.text()).substring(0, 200);
-              } catch {
-              }
-              console.log(
-                "[AD DEBUG] Access token HTTP " + accessTokenResponse.status + " for " + playerType + (accessTokenResponse.status === 403 ? " (integrity: " + (state.ClientIntegrityHeader ? "present" : "missing") + ")" : "") + errorBody
-              );
-              recordTokenFetchFailure(streamInfo, brk, playerType);
-            }
-          } catch (err) {
-            console.log("[AD DEBUG] Access token failed for " + playerType + ": " + err.message);
-            recordTokenFetchFailure(streamInfo, brk, playerType);
+          const fetched = await fetchBackupEncodings(streamInfo, brk, playerType, realFetch);
+          if (fetched === "missing-token") {
+            continue;
           }
+          encodingsM3u8 = fetched;
         }
-        if (encodingsM3u8) {
-          try {
-            const variant = getStreamVariantForResolution(encodingsM3u8, currentResolution);
-            const streamM3u8Url = variant?.url;
-            if (!variant || !streamM3u8Url) {
-              throw new Error("no variant playlist in the backup encodings");
+        const candidate = encodingsM3u8 ? await fetchBackupPlaylist(encodingsM3u8, playerType, currentResolution, realFetch) : null;
+        if (candidate) {
+          if (playerType === state.FallbackPlayerType) {
+            fallback = candidate;
+          }
+          const backupHasAds = hasAdTags(candidate.m3u8);
+          if (!backupHasAds && (state.SimulatedAdsDepth === 0 || playerTypeIndex >= state.SimulatedAdsDepth - 1) || !fallback && isLastType) {
+            if (brk.ConsecutiveAllStrippedPolls >= 1 && !backupHasAds) {
+              noteCleanDuringFreeze(brk, playerType);
             }
-            const streamM3u8Response = await realFetch(streamM3u8Url);
-            if (streamM3u8Response.status === 200) {
-              const m3u8Text = await streamM3u8Response.text();
-              if (m3u8Text) {
-                if (playerType === state.FallbackPlayerType) {
-                  fallbackM3u8 = m3u8Text;
-                  fallbackCodecs = variant.codecs;
-                }
-                const backupHasAds = hasAdTags(m3u8Text);
-                if (!backupHasAds && (state.SimulatedAdsDepth === 0 || playerTypeIndex >= state.SimulatedAdsDepth - 1) || !fallbackM3u8 && playerTypeIndex >= playerTypesToTry.length - 1) {
-                  if (brk.ConsecutiveAllStrippedPolls >= 1 && !backupHasAds) {
-                    const prevType = brk.LastCommittedBackupPlayerType;
-                    if (prevType && prevType !== playerType) {
-                      console.log(
-                        "[AD DEBUG] Cycle switched to different clean type (" + playerType + ", was " + prevType + ") during freeze — recovered without reload"
-                      );
-                      brk.CycleRescued = true;
-                    } else {
-                      console.log(
-                        "[AD DEBUG] Same backup type (" + playerType + ") became clean during freeze — natural recovery"
-                      );
-                    }
-                  }
-                  backupPlayerType = playerType;
-                  backupM3u8 = m3u8Text;
-                  backupCodecs = variant.codecs;
-                  break;
-                }
-                if (backupHasAds) {
-                  if (!brk.ContaminatedTypes.has(playerType)) {
-                    brk.ContaminatedTypes.add(playerType);
-                    console.log("[AD DEBUG] Backup stream (" + playerType + ") also has ads");
-                  }
-                }
-                if (isDoingMinimalRequests) {
-                  backupPlayerType = playerType;
-                  backupM3u8 = m3u8Text;
-                  backupCodecs = variant.codecs;
-                  break;
-                }
-                if (backupHasAds && playerTypeIndex >= playerTypesToTry.length - 1) {
-                  console.log(
-                    "[AD DEBUG] All backup player types ad-laden — taking " + playerType + " as last-resort fallback (strip+recovery path will engage)"
-                  );
-                  backupPlayerType = playerType;
-                  backupM3u8 = m3u8Text;
-                  backupCodecs = variant.codecs;
-                  break;
-                }
-              }
-            } else {
-              console.log(
-                "[AD DEBUG] Backup stream fetch failed for " + playerType + " (status " + streamM3u8Response.status + ")"
-              );
-            }
-          } catch (err) {
-            console.log("[AD DEBUG] Backup stream error for " + playerType + ": " + err.message);
+            found = candidate;
+            break;
+          }
+          if (backupHasAds && !brk.ContaminatedTypes.has(playerType)) {
+            brk.ContaminatedTypes.add(playerType);
+            console.log("[AD DEBUG] Backup stream (" + playerType + ") also has ads");
+          }
+          if (isDoingMinimalRequests) {
+            found = candidate;
+            break;
+          }
+          if (backupHasAds && isLastType) {
+            console.log(
+              "[AD DEBUG] All backup player types ad-laden — taking " + playerType + " as last-resort fallback (strip+recovery path will engage)"
+            );
+            found = candidate;
+            break;
           }
         }
         streamInfo.BackupEncodingsM3U8Cache[playerType] = null;
@@ -2397,30 +2368,100 @@
         }
       }
     }
-    if (!backupM3u8 && fallbackM3u8) {
+    if (!found && fallback) {
       if (brk.ContaminatedTypes.has(state.FallbackPlayerType)) {
         console.log(
           "[AD DEBUG] Skipping fallback to " + state.FallbackPlayerType + " — marked contaminated this break (" + [...brk.ContaminatedTypes].join(", ") + " all ad-laden)"
         );
       } else {
-        backupPlayerType = state.FallbackPlayerType;
-        backupM3u8 = fallbackM3u8;
-        backupCodecs = fallbackCodecs;
+        found = fallback;
       }
     }
-    if (backupM3u8 && backupPlayerType) {
-      return {
-        playerType: backupPlayerType,
-        m3u8: backupM3u8,
-        searchStartedAt: backupSearchStart,
-        coldTokenFetches: backupColdTokenFetches,
-        codecs: backupCodecs
-      };
+    if (found) {
+      return { ...found, searchStartedAt: backupSearchStart, coldTokenFetches: backupColdTokenFetches };
     }
     console.log(
       "[AD DEBUG] No ad-free backup stream found — ads may leak. Tried: " + playerTypesToTry.slice(startIndex).join(", ")
     );
     return null;
+  }
+  async function fetchBackupEncodings(streamInfo, brk, playerType, realFetch) {
+    try {
+      const accessTokenResponse = await getAccessToken(streamInfo.ChannelName, playerType);
+      if (accessTokenResponse.status !== 200) {
+        let errorBody = "";
+        try {
+          errorBody = " — " + (await accessTokenResponse.text()).substring(0, 200);
+        } catch {
+        }
+        console.log(
+          "[AD DEBUG] Access token HTTP " + accessTokenResponse.status + " for " + playerType + (accessTokenResponse.status === 403 ? " (integrity: " + (state.ClientIntegrityHeader ? "present" : "missing") + ")" : "") + errorBody
+        );
+        recordTokenFetchFailure(streamInfo, brk, playerType);
+        return null;
+      }
+      const accessToken = await accessTokenResponse.json();
+      const spat = accessToken?.data?.streamPlaybackAccessToken || accessToken?.streamPlaybackAccessToken;
+      if (!spat) {
+        const errInfo = accessToken?.errors ? " errors: " + JSON.stringify(accessToken.errors).substring(0, 300) : "";
+        console.log(
+          "[AD DEBUG] GQL response missing streamPlaybackAccessToken for " + playerType + ". Response keys: " + JSON.stringify(Object.keys(accessToken || {})) + errInfo
+        );
+        recordTokenFetchFailure(streamInfo, brk, playerType);
+        return "missing-token";
+      }
+      const urlInfo = new URL(
+        "https://usher.ttvnw.net/api/" + (state.V2API ? "v2/" : "") + "channel/hls/" + streamInfo.ChannelName + ".m3u8" + streamInfo.UsherParams
+      );
+      urlInfo.searchParams.set("sig", spat.signature);
+      urlInfo.searchParams.set("token", spat.value);
+      const encodingsM3u8Response = await realFetch(urlInfo.href);
+      if (encodingsM3u8Response.status !== 200) {
+        console.log("[AD DEBUG] Usher HTTP " + encodingsM3u8Response.status + " for " + playerType);
+        return null;
+      }
+      const encodingsM3u8 = await encodingsM3u8Response.text();
+      streamInfo.BackupEncodingsM3U8Cache[playerType] = encodingsM3u8;
+      streamInfo.ConsecutiveTokenFetchFailures = 0;
+      streamInfo.LoggedTokenFailureStreak = false;
+      return encodingsM3u8;
+    } catch (err) {
+      console.log("[AD DEBUG] Access token failed for " + playerType + ": " + err.message);
+      recordTokenFetchFailure(streamInfo, brk, playerType);
+      return null;
+    }
+  }
+  async function fetchBackupPlaylist(encodingsM3u8, playerType, currentResolution, realFetch) {
+    try {
+      const variant = getStreamVariantForResolution(encodingsM3u8, currentResolution);
+      const streamM3u8Url = variant?.url;
+      if (!variant || !streamM3u8Url) {
+        throw new Error("no variant playlist in the backup encodings");
+      }
+      const streamM3u8Response = await realFetch(streamM3u8Url);
+      if (streamM3u8Response.status !== 200) {
+        console.log(
+          "[AD DEBUG] Backup stream fetch failed for " + playerType + " (status " + streamM3u8Response.status + ")"
+        );
+        return null;
+      }
+      const m3u8 = await streamM3u8Response.text();
+      return m3u8 ? { playerType, m3u8, codecs: variant.codecs } : null;
+    } catch (err) {
+      console.log("[AD DEBUG] Backup stream error for " + playerType + ": " + err.message);
+      return null;
+    }
+  }
+  function noteCleanDuringFreeze(brk, playerType) {
+    const prevType = brk.LastCommittedBackupPlayerType;
+    if (prevType && prevType !== playerType) {
+      console.log(
+        "[AD DEBUG] Cycle switched to different clean type (" + playerType + ", was " + prevType + ") during freeze — recovered without reload"
+      );
+      brk.CycleRescued = true;
+    } else {
+      console.log("[AD DEBUG] Same backup type (" + playerType + ") became clean during freeze — natural recovery");
+    }
   }
   function commitBackup(streamInfo, brk, backupPlayerType, searchStartedAt, coldTokenFetches) {
     brk.LastCommittedBackupPlayerType = backupPlayerType;
@@ -2564,7 +2605,6 @@
       // Resolutions / URL map
       Urls: /* @__PURE__ */ Object.create(null),
       // xxx.m3u8 -> { Resolution: "284x160", FrameRate: 30.0 }
-      ResolutionList: [],
       // Codec swap
       ModifiedM3U8: null,
       CodecSwap: "native",
@@ -2655,7 +2695,7 @@
           return passThroughOnError("master playlist", encodingsM3u8, async () => {
             const serverTime = getServerTimeFromM3u8(encodingsM3u8);
             let streamInfo = state.StreamInfos[channelName];
-            if (streamInfo != null && streamInfo.EncodingsM3U8 != null) {
+            if (streamInfo != null) {
               const probeUrl = streamInfo.EncodingsM3U8.match(/^https:.*\.m3u8$/m)?.[0] || streamInfo.EncodingsM3U8.match(/^https:\/\/\S+$/m)?.[0];
               let cacheAlive = false;
               if (probeUrl) {
@@ -2668,7 +2708,7 @@
                 streamInfo = null;
               }
             }
-            if (streamInfo == null || streamInfo.EncodingsM3U8 == null) {
+            if (streamInfo == null) {
               console.log(
                 "[AD DEBUG] New stream session — channel: " + channelName + ", API: " + (state.V2API ? "v2" : "v1")
               );
@@ -2677,103 +2717,20 @@
                 encodingsM3u8,
                 parsedUrl.search
               );
-              const lines = encodingsM3u8.split(/\r?\n/);
-              for (let i = 0; i < lines.length - 1; i++) {
-                if (lines[i].startsWith("#EXT-X-STREAM-INF") && lines[i + 1].includes(".m3u8")) {
-                  const attributes = parseAttributes(lines[i]);
-                  const resolution = attributes["RESOLUTION"];
-                  if (resolution) {
-                    const resolutionInfo = {
-                      Resolution: resolution,
-                      FrameRate: attributes["FRAME-RATE"],
-                      // || '' like the three below: CODECS is optional on a STREAM-INF line,
-                      // and this entry is pushed whenever RESOLUTION is present. Leaving it
-                      // undefined is what let a direct .startsWith() reader throw and hang the
-                      // master-playlist fetch. Keep every field in this object string-valued.
-                      Codecs: attributes["CODECS"] || "",
-                      // AUDIO/VIDEO/SUBTITLES groups are copied onto the rewritten STREAM-INF
-                      // line during HEVC→AVC fallback so the variant references matching media
-                      // groups (mirrors TTV-AB v6.7.5 parser fix). Without these, the rewritten
-                      // line keeps the original HEVC variant's group ids, which point at audio
-                      // tracks the AVC backup may not carry — black screen / audio desync.
-                      Audio: attributes["AUDIO"] || "",
-                      Video: attributes["VIDEO"] || "",
-                      Subtitles: attributes["SUBTITLES"] || "",
-                      Url: lines[i + 1]
-                    };
-                    streamInfo.Urls[lines[i + 1]] = resolutionInfo;
-                    streamInfo.ResolutionList.push(resolutionInfo);
-                  }
-                  state.StreamInfosByUrl[lines[i + 1]] = streamInfo;
+              const resolutionList = [];
+              for (const { url: url2, resolution } of parseMasterVariants(encodingsM3u8)) {
+                if (resolution) {
+                  streamInfo.Urls[url2] = resolution;
+                  resolutionList.push(resolution);
                 }
+                state.StreamInfosByUrl[url2] = streamInfo;
               }
-              if (streamInfo.ResolutionList.length === 0) {
+              if (resolutionList.length === 0) {
                 console.log(
                   "[AD DEBUG] No resolutions parsed from encodings m3u8 — Twitch may have changed the format"
                 );
               }
-              const decodableResolutionList = streamInfo.ResolutionList.filter(
-                (element) => videoCodecFamily(element.Codecs) === "avc"
-              );
-              if (state.AlwaysReloadPlayerOnAd || decodableResolutionList.length > 0 && streamInfo.ResolutionList.some(
-                (element) => isEnhancedCodec(element.Codecs)
-              ) && !state.SkipPlayerReloadOnHevc) {
-                const replaceOrAppendStreamInfAttr = (line, key, value) => {
-                  if (typeof value !== "string" || !value) return line;
-                  const escaped = value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-                  const next = key + '="' + escaped + '"';
-                  const pattern = new RegExp("(^|,)" + key + '=("[^"]*"|[^,]*)');
-                  return pattern.test(line) ? line.replace(pattern, "$1" + next) : line + "," + next;
-                };
-                if (decodableResolutionList.length > 0) {
-                  for (let i = 0; i < lines.length - 1; i++) {
-                    if (lines[i].startsWith("#EXT-X-STREAM-INF")) {
-                      const resSettings = parseAttributes(lines[i]);
-                      if (isEnhancedCodec(resSettings["CODECS"])) {
-                        const oldResolution = resSettings["RESOLUTION"];
-                        const targetArea = resolutionArea(oldResolution);
-                        let newResolutionInfo = null;
-                        let closestDiff = Infinity;
-                        for (let j = 0; j < decodableResolutionList.length; j++) {
-                          const candidate = decodableResolutionList[j];
-                          const diff = Math.abs(
-                            resolutionArea(candidate.Resolution) - targetArea
-                          );
-                          if (diff < closestDiff) {
-                            closestDiff = diff;
-                            newResolutionInfo = candidate;
-                          }
-                        }
-                        if (!newResolutionInfo) continue;
-                        console.log(
-                          "ModifiedM3U8 swap " + resSettings["CODECS"] + " to " + newResolutionInfo.Codecs + " oldRes:" + oldResolution + " newRes:" + newResolutionInfo.Resolution
-                        );
-                        lines[i] = lines[i].replace(
-                          /CODECS="[^"]+"/,
-                          `CODECS="${newResolutionInfo.Codecs}"`
-                        );
-                        lines[i] = replaceOrAppendStreamInfAttr(
-                          lines[i],
-                          "AUDIO",
-                          newResolutionInfo.Audio
-                        );
-                        lines[i] = replaceOrAppendStreamInfAttr(
-                          lines[i],
-                          "VIDEO",
-                          newResolutionInfo.Video
-                        );
-                        lines[i] = replaceOrAppendStreamInfAttr(
-                          lines[i],
-                          "SUBTITLES",
-                          newResolutionInfo.Subtitles
-                        );
-                        lines[i + 1] = newResolutionInfo.Url + " ".repeat(i + 1);
-                      }
-                    }
-                  }
-                }
-                streamInfo.ModifiedM3U8 = lines.join("\n");
-              }
+              streamInfo.ModifiedM3U8 = buildAvcOnlyMaster(encodingsM3u8, resolutionList);
             }
             streamInfo.LastSeenAt = Date.now();
             return replaceServerTimeInM3u8(
@@ -3153,9 +3110,7 @@
     hookWindowWorker();
     hookFetch();
     hookXhr();
-    if (state.PlayerBufferingFix) {
-      monitorPlayerBuffering();
-    }
+    monitorPlayerBuffering();
     if (document.readyState === "complete" || document.readyState === "interactive") {
       onContentLoaded();
     } else {
