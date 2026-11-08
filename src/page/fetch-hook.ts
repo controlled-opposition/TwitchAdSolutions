@@ -4,10 +4,6 @@ import { maskAsNative } from './mask.ts';
 import { playerBufferState, state } from './state.ts';
 import { postTwitchWorkerMessage } from './workers.ts';
 
-// CSAI ad-request counters, keyed by type and split on whether a detected ad break was in
-// progress. The no-break tally is the point: an ad served while the m3u8 carried no markers
-// is one vaft never sees — nothing stripped, no backup searched, nothing else in the log.
-// The previous once-per-session latch could not surface that at all.
 const csaiRequestCounts: Record<string, { inBreak: number; noBreak: number }> = Object.create(null);
 function countCsaiRequest(url: string, transport: 'fetch' | 'xhr') {
     const csaiType = url.includes('bp=midroll') ? 'midroll' : url.includes('bp=preroll') ? 'preroll' : 'unknown';
@@ -18,8 +14,6 @@ function countCsaiRequest(url: string, transport: 'fetch' | 'xhr') {
         csaiRequestCounts[csaiType] = c;
     }
     const n = inBreak ? ++c.inBreak : ++c.noBreak;
-    // First, then every 10th. Both totals and the channel ride on every line so a dump
-    // spanning several channels reads as a ratio without the whole session in hand.
     if (n !== 1 && n % 10 !== 0) {
         return;
     }
@@ -39,7 +33,6 @@ function countCsaiRequest(url: string, transport: 'fetch' | 'xhr') {
             (n === 1 ? ' (client-side insertion, not blockable via m3u8)' : ''),
     );
 }
-/** The value of the first of `names` that is a string header. */
 function firstStringHeader(headers: Record<string, unknown>, names: readonly string[]): string | undefined {
     for (const name of names) {
         const value = headers[name];
@@ -49,7 +42,6 @@ function firstStringHeader(headers: Record<string, unknown>, names: readonly str
     }
     return undefined;
 }
-// Hook fetch() in the window scope to capture auth headers and modify player type requests
 export function hookFetch() {
     let hasLoggedHeaders = false;
     const realFetch = window.fetch;
@@ -57,8 +49,6 @@ export function hookFetch() {
     const hook = maskAsNative(function (this: unknown, url: RequestInfo | URL, init?: RequestInit) {
         if (typeof url === 'string') {
             if (url.includes('gql')) {
-                // init can be absent (a bare fetch(url) used to throw here and fail the request)
-                // or carry a Headers instance; only a plain-object header map is read.
                 const headers = (init?.headers || {}) as Record<string, unknown>;
                 for (const relay of GQL_HEADER_RELAYS) {
                     const value = firstStringHeader(headers, relay.headers);
@@ -78,7 +68,7 @@ export function hookFetch() {
                             (state.ClientIntegrityHeader ? 'yes' : 'no'),
                     );
                 }
-                // Get rid of mini player above chat - TODO: Reject this locally instead of having server reject it
+                // picture-by-picture tokens feed the mini player above chat; an empty body makes GQL reject it.
                 if (
                     init &&
                     typeof init.body === 'string' &&
@@ -129,13 +119,10 @@ export function hookFetch() {
         // biome-ignore lint/suspicious/noExplicitAny: forwards the caller's arguments untouched (the real fetch has overloads)
         return realFetch.apply(this, arguments as any);
     }, 'fetch');
-    // Without it vaft misses header updates for the worker's GQL requests and the CSAI counts;
-    // ad stripping itself happens in the worker and carries on.
     if (installHook(window, 'fetch', hook, 'window fetch')) {
         console.log('[AD DEBUG] Window fetch hook installed');
     }
 }
-// Hook XHR to detect CSAI ad requests that bypass fetch
 export function hookXhr() {
     const realXHROpen = XMLHttpRequest.prototype.open;
     const hook = maskAsNative(function (this: XMLHttpRequest, _method: string, url: string | URL) {
@@ -145,6 +132,5 @@ export function hookXhr() {
         // biome-ignore lint/suspicious/noExplicitAny: forwards whichever open() overload the caller used
         return realXHROpen.apply(this, arguments as any);
     }, 'open') as typeof realXHROpen;
-    // Only feeds the CSAI counts; nothing else depends on it.
     installHook(XMLHttpRequest.prototype, 'open', hook, 'XMLHttpRequest.open');
 }

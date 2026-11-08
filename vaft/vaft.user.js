@@ -156,21 +156,21 @@
   function defaultSharedConfig() {
     return {
       ReloadPlayerAfterAd: true,
-      // After the ad finishes do a player reload instead of pause/play
       EarlyReloadPollThreshold: 3,
-      // Number of consecutive all-stripped polls before triggering early reload (each poll ~2s, so 3 = ~6s, 5 = ~10s, 10 = ~20s; 0 = disable). Lowered from 5 to 3 to match the testing variant — field reports indicate faster early-reload recovers heavier SSAI breaks more cleanly. Override via localStorage twitchAdSolutions_earlyReloadPollThreshold.
+      // Twitch's player polls the playlist about every 2s
       PinBackupPlayerType: true,
-      // Remember which backup player type worked and try it first on next ad break
       PreferLowQualityBackup: true,
-      // Hybrid safety net for SSAI-heavy breaks: sticky escape hatch (fires after ~8s stuck in all-stripped state) + autoplay (360p) as last-resort backup when all Source types are ad-laden. Default on; set twitchAdSolutions_preferLowQualityBackup=false to disable.
+      // autoplay tokens only get a 360p variant ladder
+      // Field data: every observed channel serves ads on every Source-tier backup type.
       FastAutoplayFirstTry: true,
-      // When the prior break committed autoplay-via-escape-hatch, prepend autoplay (360p) to position 0 of playerTypesToTry on the next break — autoplay wins on first probe (~340ms) instead of cycling through 4 Source types (~1.5-2s). Auto-resets when a Source-tier type wins (channel recovered), so quality returns to full automatically if Twitch ever brings back non-ad-laden Source backups. Default on as of v67.1.0 — field data (project_all_channels_csai_only_marked) confirms every observed channel exhausts Source-tier on every break. Opt-out via localStorage twitchAdSolutions_fastAutoplayFirstTry=false.
+      // Users report fewer loading circles than with stripping in place (no MediaSource mixing).
       BackupSwapFirst: true,
-      // On ad detect, immediately swap to a backup player-type m3u8 (TTV-AB-style). Avoids MediaSource mixing from strip activity — fewer loading circles in field. Cost: extra fetches on every ad break. Default on; set twitchAdSolutions_backupSwapFirst=false to disable.
+      // Off: Twitch may fingerprint the always-complete beacon pattern while still answering 200
+      // (TTV-AB maintainer hypothesis).
       DisableAdSpoofing: true,
-      // Default OFF (was ON through v68.2.0). The always-100%-watched + audible + visible spoof beacon pattern may itself fingerprint as anomalous and trigger detection escalation (CSAI reaching the committed backup) — observed correlation in field + TTV-AB maintainer hypothesis. Spoof-accepted (no GQL rejection) does NOT prove not-fingerprinted; Twitch can 200-OK while using the beacon pattern as silent detection input. Opt in by setting twitchAdSolutions_disableAdSpoofing=false to re-enable the GQL ad-tracking beacons (video_ad_impression, video_ad_quartile_complete x 4, video_ad_pod_complete).
+      // Issue #129 mode D. A hard reload shows a black screen and play icon on desktop; its
+      // MediaSource flush is only needed after strip injection.
       SoftReloadNoStrip: true,
-      // Issue #129 (mode D): the end-of-break reload after a no-strip break that committed a backup (BackupSwapFirst swap) is SOFT, except for an autoplay backup (needs the hard reload's token refresh to leave 360p). Hard reload's MediaSource flush is only needed after strip injection (BLANK_MP4/recovery) — on a no-strip break it just pays the desktop black-screen + play-icon teardown for nothing. Default on; set twitchAdSolutions_softReloadNoStrip=false to force the old always-hard behavior.
       ForceAccessTokenPlayerType: "popout",
       GQLDeviceID: null,
       AuthorizationHeader: void 0,
@@ -232,30 +232,21 @@
     return {
       ...defaultSharedConfig(),
       RecoverFromSilentMute: true,
-      // On hard reload, if the element is already muted but vaft has successfully unmuted at any point earlier this session, treat it as a silent Twitch re-mute and recover via the backstop. Default on; set twitchAdSolutions_recoverFromSilentMute=false to disable (useful for users who deliberately mute mid-session).
       DisablePostBreakWedge: false,
-      // Post-break video-wedge recovery (mirrors GosuDRM/TTV-AB _checkPostBreakWedge, v12.0.0). Detects "audio running, video frozen" after an ad break — playhead advancing while the decoder emits no new frames — via getVideoPlaybackQuality().totalVideoFrames, which the currentTime-based freeze checks can't see. Default on. Set twitchAdSolutions_disablePostBreakWedge=true to turn it OFF.
       DisableReloadCap: false,
-      // If true, buffer monitor reloads unlimited times (pre-v47 behavior, risk of cascade)
       DriftCorrectionRate: 1.1,
-      // Playback rate for catching up to live edge after reload (0 = disable drift correction)
       PlayerBufferingDelay: 600,
-      // How often should we check the player state (in milliseconds)
       PlayerBufferingSameStateCount: 3,
-      // How many times of seeing the same player state until we trigger pause/play (it will only trigger it one time until the player state changes again)
+      // Above ~0.5s a pause/play fix makes Twitch's playback monitor snap to "buffered region
+      // 0.04…", and each fix degrades currentTime further.
       PlayerBufferingDangerZone: 0.5,
-      // Lowered 1 → 0.5: at the live edge with thin-but-functional buffer (~0.7-0.95s), the AND check (positionFrozen + bufferDuration < DangerZone) was firing on real momentary stalls — but the pause/play "fix" interacts badly with Twitch's playback-monitor (snaps to "buffered region 0.04xxx"), creating a self-sustaining cascade where each fix degrades currentTime. Lower threshold confines firing to truly-drained buffer states (<0.5s) where intervention is unambiguously needed.
       PlayerBufferingMinRepeatDelay: 8e3
-      // Minimum delay (in milliseconds) between each pause/play (this is to avoid over pressing pause/play when there are genuine buffering problems)
     };
   }
   var state = createPageState();
   var runtime = {
-    /** Set from the worker's banner updates; the buffer monitor stands down while true. */
     isActivelyStrippingAds: false,
-    /** Firefox doesn't allow hooking localStorage; reloads then write the volume/mute keys directly. */
     localStorageHookFailed: false,
-    /** Re-acquired on every monitor tick. */
     playerForMonitoringBuffering: null
   };
   var playerBufferState = {
@@ -271,7 +262,7 @@
     lastReloadAt: 0,
     userPauseIntent: false,
     loggedPauseIntent: false,
-    weJustPaused: 0,
+    scriptPausedAt: 0,
     inAdBreak: false,
     vaftEverUnmuted: false,
     hasHadData: false,
@@ -353,7 +344,6 @@
     { key: "video-muted", restoreEmpty: false },
     { key: "volume", restoreEmpty: false },
     { key: "lowLatencyModeEnabled", restoreEmpty: true },
-    // Low Latency
     { key: "persistenceEnabled", restoreEmpty: true }
     // Mini Player
   ];
@@ -544,7 +534,7 @@
         }
         return "not-done";
       }
-      if (playerBufferState.weJustPaused && Date.now() - playerBufferState.weJustPaused < SCRIPT_PAUSE_RETRY_MS) {
+      if (playerBufferState.scriptPausedAt && Date.now() - playerBufferState.scriptPausedAt < SCRIPT_PAUSE_RETRY_MS) {
         try {
           player.play()?.catch?.(() => {
           });
@@ -553,14 +543,14 @@
       }
       return "not-done";
     }
-    playerBufferState.weJustPaused = 0;
+    playerBufferState.scriptPausedAt = 0;
     playerBufferState.lastFixTime = Date.now();
     playerBufferState.stall.frozenTicks = 0;
     if (task === "pausePlay") {
       player.pause();
       player.play()?.catch?.(() => {
       });
-      playerBufferState.weJustPaused = Date.now();
+      playerBufferState.scriptPausedAt = Date.now();
       return "done";
     }
     if (document.pictureInPictureElement) {
@@ -619,7 +609,7 @@
       }
     }
     if (hardReload || refreshToken) {
-      playerBufferState.weJustPaused = Date.now();
+      playerBufferState.scriptPausedAt = Date.now();
     }
     playerState.setSrc({ isNewMediaPlayerInstance: hardReload, refreshAccessToken: refreshToken });
     postTwitchWorkerMessage("TriggeredPlayerReload");
@@ -908,7 +898,7 @@
         if (video && !video.__tasIntentHooked) {
           video.__tasIntentHooked = true;
           video.addEventListener("pause", () => {
-            if (!within(playerBufferState.weJustPaused, SCRIPT_PAUSE_ECHO_MS)) {
+            if (!within(playerBufferState.scriptPausedAt, SCRIPT_PAUSE_ECHO_MS)) {
               playerBufferState.userPauseIntent = true;
             }
           });
@@ -1041,11 +1031,9 @@
       return "hold";
     }
     const positionFrozen = playerBufferState.position === position && (playerBufferState.videoCurrentTime === void 0 || playerBufferState.videoCurrentTime === videoCurrentTime);
-    const stalled = playerBufferState.hasStreamStarted && // AND, not OR: a real stall is BOTH frozen position AND a draining buffer. Field reports
-    // on Firefox at live edge showed the OR form firing during normal thin-buffer breathing
-    // (~1-2s buffered, currentTime briefly idle waiting on a segment fetch) — pause/play
-    // would then knock the player back to readyState=1 and currentTime=0, snowballing into
-    // a self-reinforcing reload cascade.
+    const stalled = playerBufferState.hasStreamStarted && // AND, not OR: on Firefox at the live edge the buffer breathes at ~1-2s while currentTime
+    // waits on a segment, and a pause/play there knocks the player back to readyState 1,
+    // currentTime 0.
     positionFrozen && bufferDuration < state.PlayerBufferingDangerZone && playerBufferState.bufferedPosition === bufferedPosition && playerBufferState.bufferDuration >= bufferDuration && (position !== 0 || bufferedPosition !== 0 || bufferDuration !== 0);
     return stalled ? "frozen" : "healthy";
   }
@@ -1250,21 +1238,21 @@
   function defaultSharedConfig() {
     return {
       ReloadPlayerAfterAd: true,
-      // After the ad finishes do a player reload instead of pause/play
       EarlyReloadPollThreshold: 3,
-      // Number of consecutive all-stripped polls before triggering early reload (each poll ~2s, so 3 = ~6s, 5 = ~10s, 10 = ~20s; 0 = disable). Lowered from 5 to 3 to match the testing variant — field reports indicate faster early-reload recovers heavier SSAI breaks more cleanly. Override via localStorage twitchAdSolutions_earlyReloadPollThreshold.
+      // Twitch's player polls the playlist about every 2s
       PinBackupPlayerType: true,
-      // Remember which backup player type worked and try it first on next ad break
       PreferLowQualityBackup: true,
-      // Hybrid safety net for SSAI-heavy breaks: sticky escape hatch (fires after ~8s stuck in all-stripped state) + autoplay (360p) as last-resort backup when all Source types are ad-laden. Default on; set twitchAdSolutions_preferLowQualityBackup=false to disable.
+      // autoplay tokens only get a 360p variant ladder
+      // Field data: every observed channel serves ads on every Source-tier backup type.
       FastAutoplayFirstTry: true,
-      // When the prior break committed autoplay-via-escape-hatch, prepend autoplay (360p) to position 0 of playerTypesToTry on the next break — autoplay wins on first probe (~340ms) instead of cycling through 4 Source types (~1.5-2s). Auto-resets when a Source-tier type wins (channel recovered), so quality returns to full automatically if Twitch ever brings back non-ad-laden Source backups. Default on as of v67.1.0 — field data (project_all_channels_csai_only_marked) confirms every observed channel exhausts Source-tier on every break. Opt-out via localStorage twitchAdSolutions_fastAutoplayFirstTry=false.
+      // Users report fewer loading circles than with stripping in place (no MediaSource mixing).
       BackupSwapFirst: true,
-      // On ad detect, immediately swap to a backup player-type m3u8 (TTV-AB-style). Avoids MediaSource mixing from strip activity — fewer loading circles in field. Cost: extra fetches on every ad break. Default on; set twitchAdSolutions_backupSwapFirst=false to disable.
+      // Off: Twitch may fingerprint the always-complete beacon pattern while still answering 200
+      // (TTV-AB maintainer hypothesis).
       DisableAdSpoofing: true,
-      // Default OFF (was ON through v68.2.0). The always-100%-watched + audible + visible spoof beacon pattern may itself fingerprint as anomalous and trigger detection escalation (CSAI reaching the committed backup) — observed correlation in field + TTV-AB maintainer hypothesis. Spoof-accepted (no GQL rejection) does NOT prove not-fingerprinted; Twitch can 200-OK while using the beacon pattern as silent detection input. Opt in by setting twitchAdSolutions_disableAdSpoofing=false to re-enable the GQL ad-tracking beacons (video_ad_impression, video_ad_quartile_complete x 4, video_ad_pod_complete).
+      // Issue #129 mode D. A hard reload shows a black screen and play icon on desktop; its
+      // MediaSource flush is only needed after strip injection.
       SoftReloadNoStrip: true,
-      // Issue #129 (mode D): the end-of-break reload after a no-strip break that committed a backup (BackupSwapFirst swap) is SOFT, except for an autoplay backup (needs the hard reload's token refresh to leave 360p). Hard reload's MediaSource flush is only needed after strip injection (BLANK_MP4/recovery) — on a no-strip break it just pays the desktop black-screen + play-icon teardown for nothing. Default on; set twitchAdSolutions_softReloadNoStrip=false to force the old always-hard behavior.
       ForceAccessTokenPlayerType: "popout",
       GQLDeviceID: null,
       AuthorizationHeader: void 0,
@@ -1333,12 +1321,7 @@
   function createWorkerState() {
     return {
       ...defaultSharedConfig(),
-      // 'twitch-stitched' catches the twitch-stitched-* DATERANGE class family
-      // (-ad, -mid, -pod, etc.) without requiring an exact -ad suffix. Twitch-
-      // prefixed so we don't re-introduce the PR #120 false-positive from bare
-      // 'stitched' substring match. The specific twitch-stitched-ad DATERANGE
-      // marker is a subset of this prefix.
-      /** Substrings that mark an m3u8 as carrying ads. */
+      // Twitch's twitch-stitched-* DATERANGE classes; a bare 'stitched' gave false positives (PR #120).
       AdSignifiers: [
         "stitched-ad",
         "EXT-X-CUE-OUT",
@@ -1346,25 +1329,15 @@
         'EXT-X-DATERANGE:CLASS="twitch-maf-ad"',
         'EXT-X-DATERANGE:CLASS="twitch-trigger"'
       ],
-      // DATERANGE classes confirmed as session/source metadata over weeks of field
-      // observation — surface as "candidates" otherwise. Filtered out by the candidate
-      // logger so the diagnostic stays focused on genuinely new markers.
+      // Twitch DATERANGE classes seen on non-ad playlists; the unknown-marker log skips them.
       KnownNonAdSignifiers: ["twitch-session", "twitch-stream-source", "twitch-ad-quartile", "twitch-assignment"],
-      /** Segment URL substrings that identify ad segments. */
       AdSegmentURLPatterns: ["/adsquared/", "/_404/", "/processing"],
-      // Precompiled regexes shared across the stripAdSegments hot path, so literals
-      // inside the per-line strip loop don't recompile on every iteration — for
-      // a 100-line m3u8 at ~2 polls/sec during an ad break, hoisting the URL
-      // rewrite alone saves ~200 regex compilations per second.
       TwitchAdUrlRewriteRegex: /(X-TV-TWITCH-AD(?:-[A-Z]+)*-URLS?=")[^"]*(")/g,
       UriAttributeRegex: /URI="([^"]+)"/,
       ClientID: "kimne78kx3ncx6brgo4mv6wki5h1ko",
-      /** Player types tried, in order, when searching for an ad-free backup stream. */
       BackupPlayerTypes: [
-        // Order matters: first clean type wins. 'embed' moved to end — field-observed
-        // Twitch returns GQL 'server error' for streamPlaybackAccessToken on embed when
-        // requested from twitch.tv origin, wasting ~200-400ms per break as first-try.
-        // Kept in case it ever succeeds on some channel/user combo.
+        // First clean type wins. Twitch's GQL answers 'server error' to embed tokens requested
+        // from twitch.tv, so embed goes last.
         "site",
         //Source
         "popout",
@@ -1372,23 +1345,18 @@
         "mobile_web",
         //Mobile
         "embed"
-        //Source (unreliable — see note above)
-        // 'autoplay' (360p) removed: when committed as cycle backup, the player gets stuck
-        // in an endless loading circle after the CSAI-only path releases the backup —
-        // autoplay variants don't transition cleanly back to main stream variants.
+        //Source
+        // Not 'autoplay': committed as a backup, the player loops a loading circle once the
+        // backup is released, since autoplay variants don't transition back to the main stream's.
       ],
       FallbackPlayerType: "site",
-      // was 'embed' — site is more reliable when all Source types end up ad-laden
+      // more reliable than embed when every Source type is ad-laden
       PlayerReloadMinimalRequestsTime: 1500,
       PlayerReloadMinimalRequestsPlayerIndex: 2,
-      //autoplay
-      /** Channel name -> stream state. */
       StreamInfos: /* @__PURE__ */ Object.create(null),
-      /** Variant playlist URL -> owning stream state. */
       StreamInfosByUrl: /* @__PURE__ */ Object.create(null),
       SimulatedAdsDepth: 0,
       V2API: false,
-      /** Ad segment URL -> time it was cached (ms). The worker fetch hook answers these with a blank MP4. */
       AdSegmentCache: /* @__PURE__ */ new Map(),
       AllSegmentsAreAdSegments: false,
       StreamInfoMaxAgeMs: 30 * 60 * 1e3
@@ -1583,7 +1551,7 @@
       StartedAt: Date.now(),
       IsMidroll: false,
       PodLength: podLengthMatch ? parseInt(podLengthMatch[1], 10) : 1,
-      // High-confidence markers: tell real ads from false-positive signifier matches.
+      // Twitch sets these only on real ads, unlike some AdSignifiers matches.
       HasConfirmedAdAttrs: textStr.includes("X-TV-TWITCH-AD-AD-SESSION-ID") || textStr.includes("X-TV-TWITCH-AD-RADS-TOKEN"),
       End: null,
       Path: "probing",
@@ -1849,11 +1817,9 @@
         resolution: resolution ? {
           Resolution: resolution,
           FrameRate: attributes["FRAME-RATE"],
-          // CODECS is optional on a STREAM-INF line; keep every field string-valued so
-          // readers can call string methods without a guard.
           Codecs: attributes["CODECS"] || "",
-          // Copied onto the rewritten line by buildAvcOnlyMaster, so it references
-          // media groups the AVC variant carries (TTV-AB v6.7.5 parser fix).
+          // Copied onto the rewritten line by buildAvcOnlyMaster, so it references media
+          // groups the AVC variant carries.
           Audio: attributes["AUDIO"] || "",
           Video: attributes["VIDEO"] || "",
           Subtitles: attributes["SUBTITLES"] || "",
@@ -2580,42 +2546,28 @@
   }
   function createStreamInfo(channelName, encodingsM3u8, usherParams) {
     return {
-      // Identity / lifecycle
       ChannelName: channelName,
       LastSeenAt: Date.now(),
       EncodingsM3U8: encodingsM3u8,
       UsherParams: usherParams,
-      // Resolutions / URL map
       Urls: /* @__PURE__ */ Object.create(null),
-      // xxx.m3u8 -> { Resolution: "284x160", FrameRate: 30.0 }
-      // Codec swap
       ModifiedM3U8: null,
       CodecSwap: "native",
       Break: null,
       ConsecutiveZeroStripBreaks: 0,
       LastAdCachePruneAt: 0,
-      // stripAdSegments: last AdSegmentCache prune (throttled to once per 60s)
-      // Clean playlist snapshot for all-stripped recovery (mirrors TTV-AB)
       LastCleanNativeM3U8: null,
       LastCleanNativePlaylistAt: 0,
-      // Backup player types, across breaks
       BackupEncodingsM3U8Cache: /* @__PURE__ */ Object.create(null),
-      // player type -> encodings m3u8 (null once used)
       PinnedBackupPlayerType: null,
       SourceTierExhausted: false,
       FastAutoplayWins: 0,
-      // Last player reload (post-ad re-entry guards, minimal-request window)
       LastPlayerReload: 0,
       ReloadPending: false,
-      // the page reloaded; the next poll stamps LastPlayerReload
-      // Diagnostics
       HasCheckedUnknownTags: false,
       LoggedOfflineTransition: false,
-      // Set when the m3u8 turns offline-shaped mid-session.
       ConsecutiveTokenFetchFailures: 0,
-      // Consecutive failed access-token fetches across player types. Logged at threshold, reset on success.
       LoggedTokenFailureStreak: false,
-      // Once-per-streak guard for the threshold log.
       LoggedAdCacheSize1k: false
     };
   }

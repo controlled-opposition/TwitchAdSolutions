@@ -7,22 +7,15 @@ import { resetStallLadder, type StallObservation, stallTick } from './stall.ts';
 import { armWedgeWatch, wedgeSample } from './wedge.ts';
 import type { TwitchMediaPlayer, TwitchPlayerState } from './twitch.ts';
 
-// Grace windows after a player reload and after a backup stream switch (start or end of an ad
-// break): the stall fixes stand down while the player settles.
 const RELOAD_GRACE_MS = 15000;
 const BACKUP_SWITCH_GRACE_MS = 10000;
-/** A pause event this soon after our own pause/play or reload is ours, not the user's. */
 const SCRIPT_PAUSE_ECHO_MS = 2000;
-/** Loading-circle detector: stall length before reloading, and cooldown between its reloads. */
 const AD_STALL_RELOAD_AFTER_MS = 3000;
 const AD_STALL_COOLDOWN_MS = 15000;
-/** Whether timestamp `at` is set and less than `ms` ago. */
 function within(at: number, ms: number): boolean {
     return !!at && Date.now() - at < ms;
 }
-/** A tick scheduled by the visibility listener is pending (dedupes repeated events). */
 let pendingTick = false;
-/** Run the first monitor tick, then tick right away whenever the tab becomes visible again. */
 export function startBufferMonitor() {
     monitorPlayerBuffering();
     document.addEventListener('visibilitychange', () => {
@@ -35,9 +28,8 @@ export function startBufferMonitor() {
         }
     });
 }
-// Poll the player state to detect and fix buffering caused by ad stream switching
 function monitorPlayerBuffering() {
-    // Fresh player lookup every tick (avoids stale ref when Twitch restarts its own player)
+    // Twitch can restart its player, so look it up every tick.
     runtime.playerForMonitoringBuffering = null;
     {
         const playerAndState = getPlayerAndState();
@@ -50,7 +42,7 @@ function monitorPlayerBuffering() {
             if (video && !video.__tasIntentHooked) {
                 video.__tasIntentHooked = true;
                 video.addEventListener('pause', () => {
-                    if (!within(playerBufferState.weJustPaused, SCRIPT_PAUSE_ECHO_MS)) {
+                    if (!within(playerBufferState.scriptPausedAt, SCRIPT_PAUSE_ECHO_MS)) {
                         playerBufferState.userPauseIntent = true;
                     }
                 });
@@ -78,26 +70,18 @@ function monitorPlayerBuffering() {
     checkAdStall();
     const isLive = runtime.playerForMonitoringBuffering?.state?.props?.content?.type === 'live';
     if (playerBufferState.isLive && !isLive) {
-        // Left live content: nothing is being stripped for this player any more.
         runtime.isActivelyStrippingAds = false;
         updateAdblockBanner({
             hasAds: false,
         });
     }
     playerBufferState.isLive = isLive;
-    // Catch persistent ad-break overlays (e.g. "taking an ad break / stick around")
-    // even after hasAds has transitioned to false. updateAdblockBanner only calls
-    // hideTwitchAdOverlays during the active ad break; some overlays have their own
-    // lifecycle and stay visible afterwards. Running here on every monitor tick
-    // (1-3s cadence) keeps them hidden without a dedicated interval.
+    // Twitch's ad overlays can outlive the break, so hide them on every tick, not only during one.
     try {
         hideTwitchAdOverlays();
     } catch {}
-    // Visibility-aware backoff: poll 3x slower when tab is hidden (but NOT during PiP — user is still watching).
-    // Exception: don't back off during an active ad break — hidden-tab recovery (backup search → reload) is
-    // already slowed by browser timer clamping; the 3x backoff compounds the "stuck loading until refocus"
-    // stall some users hit when a break starts on a backgrounded tab (issue #129). Workaround, not a full fix:
-    // background media deprioritization is browser-level. Negligible cost — only polls faster while hidden + in-break.
+    // Hidden tabs poll 3x slower, except in PiP and during a break: browsers already clamp
+    // background-tab timers, and slowing further left breaks stuck loading until refocus (issue #129).
     const shouldThrottle =
         typeof document !== 'undefined' &&
         document.hidden &&
@@ -107,7 +91,6 @@ function monitorPlayerBuffering() {
     setTimeout(monitorPlayerBuffering, nextDelay);
 }
 
-// A new channel: everything the monitor learned about the previous one is void.
 function onChannelChange(channelName: string) {
     playerBufferState.channelName = channelName;
     playerBufferState.hasStreamStarted = false;
@@ -118,8 +101,6 @@ function onChannelChange(channelName: string) {
     playerBufferState.adStall = { phase: 'idle' };
 }
 
-// Stall ladder (src/page/stall.ts) and position-jump drift detection. Stands down outside live
-// playback, during ad handling and in the grace windows after reloads and backup switches.
 function checkStall(player: TwitchMediaPlayer, twitchState: TwitchPlayerState) {
     if (twitchState.props?.content?.type !== 'live' || player.isPaused()) {
         return;
@@ -155,25 +136,16 @@ function checkStall(player: TwitchMediaPlayer, twitchState: TwitchPlayerState) {
     const position = player.core?.state?.position;
     const bufferedPosition = player.core?.state?.bufferedPosition;
     const bufferDuration = player.getBufferDuration();
-    // video.currentTime is the source of truth for actual playback progress —
-    // player.core.state.position updates in batches on reload-heavy channels
-    // (see PR #183 commit msg), so it can appear frozen for ~12s even while
-    // the video element is advancing smoothly. Used in the stall trigger below
-    // alongside state.position so a real stall (BOTH frozen) is required to
-    // fire, not just a batch-update lull in state.position.
+    // Twitch's core.state.position updates in batches on reload-heavy channels (PR #183) and can
+    // look frozen for ~12s while currentTime advances; a stall needs both frozen.
     const videoCurrentTime = video.currentTime;
     if (position === undefined || bufferedPosition === undefined) {
         playerBufferState.stall.frozenTicks = 0;
         return;
     }
-    // NOTE: This could be improved. It currently lets the player fully eat the full buffer before it triggers pause/play
-    // FFZ's audio compressor wraps player.load() and creates a fresh <video>
-    // element on every load (src/sites/shared/player.jsx replaceVideoElement).
-    // Twitch's playback-monitor then snaps the new element to "buffered region
-    // 0.04xxx" while the buffer rebuilds. During that brief ramp-up window,
-    // currentTime plateaus and state.position is also at its post-reload reset
-    // — exactly the positionFrozen pattern. Detect the swap by element identity
-    // and treat it like a fresh reload (start a new recovery window).
+    // FFZ's audio compressor replaces the <video> on every player.load() (FFZ
+    // src/sites/shared/player.jsx replaceVideoElement), and Twitch's playback monitor snaps the new
+    // element to "buffered region 0.04…" while its buffer rebuilds: start a new recovery window.
     if (playerBufferState.videoElement && playerBufferState.videoElement !== video) {
         resetStallLadder(playerBufferState.stall);
     }
@@ -199,7 +171,6 @@ function checkStall(player: TwitchMediaPlayer, twitchState: TwitchPlayerState) {
                 playerBufferState.bufferDuration +
                 note,
         );
-        // Seek past buffer gap instead of stalling + drift to recover
         if (video.buffered.length > 1) {
             for (let bi = 0; bi < video.buffered.length; bi++) {
                 if (video.buffered.start(bi) > video.currentTime + 0.5) {
@@ -229,15 +200,8 @@ function checkStall(player: TwitchMediaPlayer, twitchState: TwitchPlayerState) {
         doTwitchPlayerTask(step.action === 'reload' ? 'reload' : 'pausePlay');
         playerBufferState.lastFixTime = Date.now();
     }
-    // Detect position jump (native gap recovery) — drift to catch up.
-    // Skip during ad breaks and 10s after: backup stream switching causes buffer gaps that trigger false jumps.
-    // Rate-limit to once per 30s: field-observed on warn that Twitch's player.core.state.position
-    // jumps ~60s every ~12s on reload-heavy channels (likely batch updates from m3u8 manifest
-    // refreshes / program-date-time sync points, not real drift). Our 1.1x videoElement.playbackRate
-    // doesn't affect state.position anyway, so re-firing every 12s is useless log spam — the catch-up
-    // operates on currentTime which is already at live edge. Rate-limit collapses the spam to a
-    // single drift attempt per 30s window, leaving real-drift paths (buffer-gap seek, post-reload)
-    // unaffected since they call startDriftCorrection() directly without going through this detector.
+    // Twitch's core.state.position can jump ~60s every ~12s on reload-heavy channels without real
+    // drift, and playbackRate doesn't move it: at most one catch-up per 30s.
     if (
         playerBufferState.position > 0 &&
         position - playerBufferState.position > 5 &&
@@ -260,7 +224,6 @@ function checkStall(player: TwitchMediaPlayer, twitchState: TwitchPlayerState) {
     playerBufferState.bufferDuration = bufferDuration;
 }
 
-// Classify this tick for the stall ladder against the previous tick's snapshot.
 function observeStall(
     video: HTMLVideoElement,
     position: number,
@@ -268,28 +231,20 @@ function observeStall(
     bufferDuration: number,
     videoCurrentTime: number | undefined,
 ): StallObservation {
-    // Hold while the <video> element isn't actively trying to play:
-    //   readyState < 2 (HAVE_CURRENT_DATA) — MSE init / seek in flight / fresh post-
-    //     reload load. currentTime and state.position are both genuinely 0 here, but
-    //     it's an initialization state, not a stall — escalating would loop reloads.
-    //   video.paused === true — player.isPaused() and the underlying <video>.paused can
-    //     disagree briefly during reload teardown / autoplay-policy mute toggles.
+    // Hold while the element isn't trying to play. Below HAVE_CURRENT_DATA (MSE init, seek, fresh
+    // load) currentTime and position are 0 without a stall. player.isPaused() and video.paused can
+    // disagree briefly during reload teardown and autoplay-policy mute toggles.
     if (video.readyState < 2 || video.paused) {
         return 'hold';
     }
-    // Position-frozen requires BOTH state.position AND video.currentTime unchanged: if
-    // currentTime is advancing the player is playing fine (the false-fires were causing
-    // user-visible 8s-cadence abrupts on low-latency / post-quality-change states).
     const positionFrozen =
         playerBufferState.position === position &&
         (playerBufferState.videoCurrentTime === undefined || playerBufferState.videoCurrentTime === videoCurrentTime);
     const stalled =
         playerBufferState.hasStreamStarted &&
-        // AND, not OR: a real stall is BOTH frozen position AND a draining buffer. Field reports
-        // on Firefox at live edge showed the OR form firing during normal thin-buffer breathing
-        // (~1-2s buffered, currentTime briefly idle waiting on a segment fetch) — pause/play
-        // would then knock the player back to readyState=1 and currentTime=0, snowballing into
-        // a self-reinforcing reload cascade.
+        // AND, not OR: on Firefox at the live edge the buffer breathes at ~1-2s while currentTime
+        // waits on a segment, and a pause/play there knocks the player back to readyState 1,
+        // currentTime 0.
         positionFrozen &&
         bufferDuration < state.PlayerBufferingDangerZone &&
         playerBufferState.bufferedPosition === bufferedPosition &&
@@ -298,8 +253,6 @@ function observeStall(
     return stalled ? 'frozen' : 'healthy';
 }
 
-// Post-break video-wedge watch (src/page/wedge.ts): armed on the ad→no-ad edge, sampled while the
-// element is actively presenting. twitchAdSolutions_disablePostBreakWedge=true disables it.
 function checkPostBreakWedge() {
     const inAd = playerBufferState.inAdBreak;
     if (playerBufferState.wedgeWasInAdBreak && !inAd) {
@@ -319,8 +272,6 @@ function checkPostBreakWedge() {
     }
     try {
         const wv = monitored.player?.getHTMLVideoElement?.();
-        // Only evaluable when the element is actively presenting: playing, has a video track,
-        // decoded metadata, and exposes the playback-quality API. Otherwise wait (don't burn budget).
         if (
             !wv ||
             wv.ended ||
@@ -365,10 +316,6 @@ function checkPostBreakWedge() {
     } catch {}
 }
 
-// Loading-circle detector (AdStallState): during an ad strip+recovery loop the normal stall
-// ladder is gated off (isActivelyStrippingAds), so a visibly stalled player would otherwise wait
-// for the worker's poll-based early reload (~10s). This catches the visible stall ~3s after it
-// starts and reloads directly, eliminating most of the loading-circle window.
 function checkAdStall() {
     if (!runtime.isActivelyStrippingAds) {
         playerBufferState.adStall = { phase: 'idle' };
@@ -382,9 +329,7 @@ function checkAdStall() {
         if (!video || video.ended || playerBufferState.userPauseIntent) {
             return;
         }
-        // Whether the player has had data on this channel — distinguishes a real stall (had
-        // data, lost data) from initial player init (readyState=0 is normal then; without this,
-        // fresh page load + preroll misfires repeatedly, PR #96).
+        // readyState is 0 during the player's initial load (PR #96).
         if (video.readyState >= 3) {
             playerBufferState.hasHadData = true;
         }
@@ -393,8 +338,7 @@ function checkAdStall() {
             playerBufferState.adStall = { phase: 'idle' };
             return;
         }
-        // Not while any reload is recent — readyState=0 is the expected transient state during a
-        // reload's MediaSource teardown, and an early reload may be in flight.
+        // readyState 0 is expected during a reload's MediaSource teardown.
         if (
             within(playerBufferState.lastAdStallReloadAt, AD_STALL_COOLDOWN_MS) ||
             within(playerBufferState.lastReloadAt, AD_STALL_COOLDOWN_MS) ||

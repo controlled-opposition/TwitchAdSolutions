@@ -1,7 +1,6 @@
-/** Twitch's worker scripts, by blob URL. Fetched synchronously, since the Worker constructor is synchronous. */
+// Synchronous XHR: the Worker constructor that needs this script is synchronous.
 const cache: Record<string, string> = Object.create(null);
 
-/** Twitch's worker script for a blob URL (cached). */
 export function getWasmWorkerJs(twitchBlobUrl: string): string {
     if (cache[twitchBlobUrl]) {
         return cache[twitchBlobUrl];

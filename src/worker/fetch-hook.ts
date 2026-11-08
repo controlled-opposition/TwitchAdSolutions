@@ -5,9 +5,8 @@ import { buildAvcOnlyMaster, getServerTimeFromM3u8, parseMasterVariants, replace
 import { createStreamInfo } from './stream-info.ts';
 import { state } from './state.ts';
 
-// Builds the response for a playlist the hook rewrites. If rewriting throws, the playlist goes
-// through unmodified (ads may show) rather than the request failing or never settling: the
-// player's own retry would only hit the same error, and a request that never settles stalls it.
+// A playlist request that never settles stalls Twitch's player, and its retry would hit the same
+// rewrite error, so a failed rewrite passes the original through.
 async function passThroughOnError(kind: string, original: string, rewrite: () => Promise<string>): Promise<Response> {
     try {
         return new Response(await rewrite());
@@ -18,8 +17,6 @@ async function passThroughOnError(kind: string, original: string, rewrite: () =>
         return new Response(original);
     }
 }
-// Hook fetch() in the worker scope to intercept m3u8 playlist requests and ad segments.
-// Returns whether the hook is in place.
 export function hookWorkerFetch(): boolean {
     console.log('[AD DEBUG] hookWorkerFetch (vaft)');
     const BLANK_MP4 = new Blob(
@@ -68,11 +65,8 @@ export function hookWorkerFetch(): boolean {
                     const serverTime = getServerTimeFromM3u8(encodingsM3u8);
                     let streamInfo: StreamInfo | null = state.StreamInfos[channelName];
                     if (streamInfo != null) {
-                        // Probe one variant of the cached encodings; if it's gone, the stream
-                        // probably restarted and the cache is dead. v2 API variant lines are raw CDN
-                        // URLs without '.m3u8', hence the fallback pattern. No probe URL, or a probe
-                        // that rejects, also counts as dead: this used to be fetch(undefined) / an
-                        // uncaught rejection, which left this master-playlist request unresolved.
+                        // A dead variant URL means the stream restarted. v2 API variant lines are
+                        // CDN URLs without '.m3u8'.
                         const probeUrl =
                             streamInfo.EncodingsM3U8.match(/^https:.*\.m3u8$/m)?.[0] ||
                             streamInfo.EncodingsM3U8.match(/^https:\/\/\S+$/m)?.[0];
@@ -87,8 +81,6 @@ export function hookWorkerFetch(): boolean {
                         }
                     }
                     if (streamInfo == null) {
-                        // A new StreamInfo starts with no reload pending (ReloadPending is per
-                        // stream), so a reload on the previous session can't bleed into this one.
                         console.log(
                             '[AD DEBUG] New stream session — channel: ' +
                                 channelName +
@@ -116,10 +108,6 @@ export function hookWorkerFetch(): boolean {
                         streamInfo.ModifiedM3U8 = buildAvcOnlyMaster(encodingsM3u8, resolutionList);
                     }
                     streamInfo.LastSeenAt = Date.now();
-                    // Note: do NOT set streamInfo.LastPlayerReload here. It was previously
-                    // set unconditionally on new stream session creation, which made the
-                    // reload-timing checks treat the session-creation timestamp as a recent
-                    // reload, even though no reload had actually occurred.
                     return replaceServerTimeInM3u8(
                         (streamInfo.CodecSwap !== 'native' && streamInfo.ModifiedM3U8) || streamInfo.EncodingsM3U8,
                         serverTime,

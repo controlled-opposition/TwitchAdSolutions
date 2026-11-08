@@ -16,7 +16,7 @@ import { playerBufferState, runtime, state } from './state.ts';
 import { runWorker } from './worker-bundle.ts';
 import { postTwitchWorkerMessage, twitchWorkers } from './workers.ts';
 
-// Strings used to detect and handle conflicting Twitch worker overrides (e.g. TwitchNoSub)
+// Markers of other extensions' Worker overrides (TwitchNoSub).
 const workerStringConflicts = [
     'twitch',
     'isVariantA', // TwitchNoSub
@@ -27,7 +27,6 @@ const workerStringReinsert = [
     // biome-ignore lint/suspicious/noTemplateCurlyInString: literal marker string from TwitchNoSub's worker source
     '${patch_url}', // TwitchNoSub (0.9.1)
 ];
-// Walk the Worker prototype chain and remove conflicting overrides
 function getCleanWorker(worker: typeof Worker): typeof Worker | null {
     let root = null;
     let parent = null;
@@ -36,9 +35,7 @@ function getCleanWorker(worker: typeof Worker): typeof Worker | null {
         const workerString = proto.toString();
         if (workerStringConflicts.some((x) => workerString.includes(x))) {
             if (parent !== null) {
-                // Another extension may have frozen Worker.prototype or set non-configurable
-                // [[Prototype]]; setPrototypeOf throws TypeError in that case. Catch per-link
-                // so a single foreign-frozen ring doesn't abort the whole chain walk.
+                // setPrototypeOf throws on a link another extension froze; skip that link.
                 try {
                     Object.setPrototypeOf(parent, Object.getPrototypeOf(proto));
                 } catch {}
@@ -68,8 +65,6 @@ function getWorkersForReinsert(worker: typeof Worker): object[] {
 function reinsertWorkers(worker: typeof Worker, reinsert: object[]): typeof Worker {
     let parent = worker;
     for (let i = 0; i < reinsert.length; i++) {
-        // Per-link try-catch: a foreign extension that froze a single proto entry
-        // shouldn't break the whole reinsertion chain. Skip the failing link, keep going.
         try {
             Object.setPrototypeOf(reinsert[i], parent);
         } catch {}
@@ -89,7 +84,6 @@ export function isValidWorker(worker: { toString(): string }): boolean {
     }
     return !hasConflict || hasReinsert;
 }
-// Replace window.Worker to intercept Twitch's video worker and inject ad-blocking logic
 let injectedBlobUrl: string | null = null;
 let originalRevokeObjectURL: typeof URL.revokeObjectURL | null = null;
 export function hookWindowWorker() {
@@ -102,15 +96,13 @@ export function hookWindowWorker() {
             return realRevokeObjectURL.call(this, url);
         }, 'revokeObjectURL');
         hook.__tasMasked = true;
-        // Without it Twitch may revoke the injected blob URL early; the worker has normally
-        // started by then, so this is logged and otherwise ignored.
+        // If this fails, the worker has normally fetched its script before Twitch revokes the URL.
         installHook(URL, 'revokeObjectURL', hook, 'URL.revokeObjectURL');
     }
     const reinsert = getWorkersForReinsert(window.Worker);
     const cleanWorker = getCleanWorker(window.Worker) || window.Worker;
     const newWorker = class Worker extends cleanWorker {
         constructor(twitchBlobUrl: string | URL, options?: WorkerOptions) {
-            // Twitch passes a string; normalize so a URL object can't break the blob template below.
             twitchBlobUrl = String(twitchBlobUrl);
             let isTwitchWorker = false;
             try {
@@ -121,7 +113,6 @@ export function hookWindowWorker() {
                 console.log('[AD DEBUG] Non-Twitch worker skipped: ' + twitchBlobUrl);
                 return;
             }
-            // Pre-check: verify we can fetch the worker JS before injecting
             let prefetchedWorkerJs = null;
             try {
                 prefetchedWorkerJs = getWasmWorkerJs(twitchBlobUrl);
@@ -131,23 +122,17 @@ export function hookWindowWorker() {
                 console.log('[AD DEBUG] Failed to fetch worker JS — falling back to unmodified worker');
                 return;
             }
-            // Blob already carries our hooks: re-injecting would install
-            // hookWorkerFetch twice and double-process every m3u8 response.
-            // Reuse it as-is, but still register below so its messages are heard.
             const alreadyHooked = prefetchedWorkerJs.includes('hookWorkerFetch');
             if (alreadyHooked) {
                 super(twitchBlobUrl, options);
                 console.log('[AD DEBUG] Worker already hooked — reusing without re-injection');
             } else {
                 console.log('[AD DEBUG] Worker intercepted — injecting ad-block hooks');
-                // Revoke previous blob URL to prevent memory accumulation across worker replacements
                 if (injectedBlobUrl && originalRevokeObjectURL) {
                     try {
                         originalRevokeObjectURL.call(URL, injectedBlobUrl);
                     } catch {}
                 }
-                // The worker bundle is one self-contained function (src/worker/index.ts), so its
-                // source text runs as-is in the worker; the page's settings ride along as JSON.
                 const init: WorkerInit = { twitchBlobUrl, config: pickSharedConfig(state) };
                 const newBlobStr = `(${runWorker.toString()})(${JSON.stringify(init)});`;
                 injectedBlobUrl = URL.createObjectURL(new Blob([newBlobStr]));
@@ -166,7 +151,6 @@ export function hookWindowWorker() {
                     try {
                         outcome = doTwitchPlayerTask('reload', kind);
                     } finally {
-                        // Answer even if the task threw, so the worker's request doesn't hang.
                         if (requestId) {
                             postTwitchWorkerMessage('ReloadResult', {
                                 requestId,
@@ -186,12 +170,8 @@ export function hookWindowWorker() {
                     });
                 }
             });
-            // Worker crash recovery — IVS WASM worker can fire RuntimeError
-            // (e.g. "index out of bounds") and die. A single crash fires multiple
-            // error events; dedupe via a local flag. On first error, trigger a
-            // hard reload via the main reload path — Twitch re-spawns the worker
-            // as part of the new player instance. The crashed flag limits this to
-            // one reload per worker, so a crashing worker can't loop restarts.
+            // IVS's WASM worker can die on a RuntimeError (e.g. "index out of bounds"), firing several
+            // error events. A hard reload makes Twitch spawn a new worker with the new player instance.
             let crashed = false;
             this.addEventListener('error', (e: ErrorEvent) => {
                 if (crashed) return;
@@ -223,33 +203,23 @@ export function hookWindowWorker() {
         },
     });
 }
-// The page's mirror of the worker's ad-break state (worker: StreamInfo.Break). Every banner
-// update carries it; this is the only place it is applied.
 function onAdBreakUpdate(data: AdBlockBannerMessage) {
     runtime.isActivelyStrippingAds = !!data.isStrippingAdSegments;
-    // Track backup stream switches (start and end of ad break)
     if (data.hasAds !== playerBufferState.inAdBreak) {
         playerBufferState.lastBackupSwitchAt = Date.now();
-        // Reset position tracking on ad-end so the stream switch gap isn't detected as a jump
         if (!data.hasAds) {
             playerBufferState.position = 0;
         }
     }
     playerBufferState.inAdBreak = !!data.hasAds;
-    // Clear drift catch-up when ads start — don't run 1.1x during ad handling
     if (data.hasAds) {
         cancelDriftCorrection();
     }
     updateAdblockBanner(data);
 }
 async function handleWorkerFetchRequest(fetchRequest: WorkerFetchRequest): Promise<WorkerFetchResponse> {
-    // 5s AbortController timeout. The worker uses this path for GQL requests
-    // (access tokens + ad-spoof beacons). Without a timeout, a hung GQL endpoint
-    // would block the worker's backup-search loop indefinitely (until browser's
-    // ~30s default), turning a slow-network blip into a multi-second player
-    // freeze during the ad break. 5s is well above normal Twitch GQL response
-    // (<1s) but bounds worst-case wait. AbortError flows through the existing
-    // catch + FailedBackupPlayerTypes lockout naturally.
+    // Twitch GQL normally answers in <1s; without a timeout a hung request stalls the worker's
+    // backup search until the browser gives up.
     const controller = new AbortController();
     const timeoutMs = 5000;
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);

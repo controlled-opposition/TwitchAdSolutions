@@ -1,25 +1,20 @@
-// Twitch internals reached through React (getPlayerAndState). Undocumented and liable to
-// change without notice, so everything vaft reads is optional and only what it uses is listed.
+// Twitch internals reached through React: undocumented and liable to change, so every member
+// vaft reads is optional.
 
-/** A React component instance. Untyped: findReactNode() matches on whatever shape Twitch's are. */
 // biome-ignore lint/suspicious/noExplicitAny: React component instances of any shape
 type ReactInstance = any;
 
-/** A React fiber node. */
 interface ReactFiber {
     stateNode?: ReactInstance;
     child?: ReactFiber | null;
     sibling?: ReactFiber | null;
 }
 
-/** The #root element, carrying React's internal container properties. */
 type ReactRootElement = Element & {
     _reactRootContainer?: { _internalRoot?: { current?: ReactFiber } };
-    // biome-ignore lint/suspicious/noExplicitAny: React's __reactContainer$<random> / __reactFiber$<random> keys
-    [key: string]: any;
+    [key: string]: unknown;
 };
 
-/** Twitch's (IVS) media player instance. */
 export interface TwitchMediaPlayer {
     core?: {
         paused?: boolean;
@@ -40,17 +35,11 @@ export interface TwitchMediaPlayer {
     pause(): void;
 }
 
-/** Twitch's player-state component: owns setSrc() and the content metadata. */
 export interface TwitchPlayerState {
     setSrc(options: { isNewMediaPlayerInstance: boolean; refreshAccessToken: boolean }): void;
     props?: { content?: { type?: string } };
 }
 
-/**
- * One pre-order walk of the fiber tree returning, for each constraint, the first component
- * instance that satisfies it (Twitch internals, untyped). Stops once every constraint has
- * matched, so finding several instances costs one walk instead of one each.
- */
 function findReactNodes(root: ReactFiber, constraints: ((stateNode: ReactInstance) => unknown)[]): ReactInstance[] {
     const found: ReactInstance[] = constraints.map(() => null);
     let remaining = constraints.length;
@@ -75,9 +64,8 @@ function findReactNodes(root: ReactFiber, constraints: ((stateNode: ReactInstanc
 function findReactNode(root: ReactFiber, constraint: (stateNode: ReactInstance) => unknown): ReactInstance {
     return findReactNodes(root, [constraint])[0];
 }
-/** Cached #root element (never changes in React SPAs). */
+// #root never changes in Twitch's React app.
 let cachedRootNode: ReactRootElement | null = null;
-/** Own-property key of #root that holds the React 18 root fiber, once found. */
 let cachedContainerKey: string | null = null;
 function findReactRootNode(): ReactFiber | null {
     let reactRootNode: ReactFiber | null = null;
@@ -98,23 +86,20 @@ function findReactRootNode(): ReactFiber | null {
         cachedContainerKey ??=
             Object.keys(rootNode).find((x) => x.startsWith('__reactContainer') || x.startsWith('__reactFiber')) ?? null;
         if (cachedContainerKey != null) {
-            reactRootNode = rootNode[cachedContainerKey];
+            reactRootNode = rootNode[cachedContainerKey] as ReactFiber;
         }
     }
     return reactRootNode;
 }
-// "Not found" log state (see the grace period at the end of getPlayerAndState).
 let firstPlayerNullAt = 0;
 let loggedNoPlayer = false;
 let firstStateNullAt = 0;
 let loggedNoState = false;
-// Traverse React's fiber tree to find Twitch's player and player state instances
 export function getPlayerAndState() {
     const reactRootNode = findReactRootNode();
     if (!reactRootNode) {
         return null;
     }
-    // Primary: named property lookups for both instances, in a single walk
     let [player, playerState] = findReactNodes(reactRootNode, [
         (node) => node.setPlayerActive && node.props && node.props.mediaPlayerInstance,
         (node) => node.setSrc && node.setInitialPlaybackSettings,
@@ -123,29 +108,23 @@ export function getPlayerAndState() {
     if (player?.playerInstance) {
         player = player.playerInstance;
     }
-    // Fallback: structural match if Twitch obfuscates property names
     if (!player) {
         player = findReactNode(
             reactRootNode,
             (node) => node.getHTMLVideoElement && node.getBufferDuration && node.core?.state,
         );
     }
-    // Fallback: structural match — setSrc exists but setInitialPlaybackSettings was renamed
     const playerStateFallback = !playerState
         ? findReactNode(reactRootNode, (node) => node.setSrc && node.setStreamManagerNode && !node.getHTMLVideoElement)
         : null;
-    // Fallback 2: TTV-AB's approach — videoPlayerInstance with playerMode
     const playerStateFallback2 =
         !playerState && !playerStateFallback
             ? findReactNode(reactRootNode, (node) => node.state?.videoPlayerInstance?.playerMode !== undefined)?.state
                   ?.videoPlayerInstance
             : null;
     const finalPlayerState = playerState || playerStateFallback || playerStateFallback2;
-    // Grace period before logging "not found" warnings. The buffer monitor can tick
-    // before React has finished mounting the player, leading to a false-positive
-    // log that fires once on every page load. Only log if the null state persists
-    // for 10+ seconds — by then React is definitely mounted and a persistent null
-    // indicates real API drift (Twitch renamed setPlayerActive/setSrc/etc).
+    // The monitor can tick before Twitch mounts the player; a null lasting 10s means Twitch renamed
+    // the internals matched above.
     if (!player) {
         if (!firstPlayerNullAt) firstPlayerNullAt = Date.now();
         if (!loggedNoPlayer && Date.now() - firstPlayerNullAt > 10000) {
@@ -155,7 +134,7 @@ export function getPlayerAndState() {
             );
         }
     } else {
-        firstPlayerNullAt = 0; // reset on successful find
+        firstPlayerNullAt = 0;
     }
     if (!finalPlayerState) {
         if (!firstStateNullAt) firstStateNullAt = Date.now();
@@ -166,17 +145,15 @@ export function getPlayerAndState() {
             );
         }
     } else {
-        firstStateNullAt = 0; // reset on successful find
+        firstStateNullAt = 0;
     }
     return {
         player: player as TwitchMediaPlayer | null,
         state: finalPlayerState as TwitchPlayerState | null,
     };
 }
-// document.querySelector('video') returns the first <video> in the DOM, which since
-// July 2026 can be a separate Twitch ad element beside the player or in chat (#249).
-// Skip anything the guard below has marked, so mute/playbackRate work always lands on
-// the real player instead of being aimed at — or skipped because of — an ad element.
+// Since July 2026 Twitch can put a separate ad <video> before the player's in the DOM (#249);
+// skip the ones hideTwitchAdOverlays marked.
 export function getPlayerVideoElement() {
     const videos = document.getElementsByTagName('video');
     for (let i = 0; i < videos.length; i++) {

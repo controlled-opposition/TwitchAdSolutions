@@ -1,19 +1,11 @@
 import type { AdBlockBannerMessage } from '../shared/types.ts';
 import { playerBufferState, runtime } from './state.ts';
 
-// Cached #root DOM element (never changes in React SPAs)
 let cachedPlayerRootDiv: HTMLElement | null = null;
-// Cached .video-player element
-// One-shot flags for overlay-hide logs. Twitch's React tree re-mounts SDA
-// wrappers and ad-break cards constantly during an ad break, so the
-// hide-and-log fires hundreds of times. Log the first occurrence of each
-// hide type per page load, then stay silent — the hide itself still runs
-// on every tick via dataset-based dedup.
+// Twitch re-mounts SDA wrappers constantly during a break; log only the first hide per page load.
 let loggedSdaHide = false;
-// Hide Twitch's ad break / Turbo promo / stream display ad overlays when we're already blocking ads
 export function hideTwitchAdOverlays() {
     if (!cachedPlayerRootDiv || !cachedPlayerRootDiv.isConnected) return;
-    // Hide stream display ad (SDA) wrapper
     const sdaElements = document.querySelectorAll('[data-test-selector="sda-wrapper"]') as NodeListOf<HTMLElement>;
     for (let i = 0; i < sdaElements.length; i++) {
         if (!sdaElements[i].dataset.tasHidden) {
@@ -25,14 +17,10 @@ export function hideTwitchAdOverlays() {
             }
         }
     }
-    // Separate video-ad guard (mirrors GosuDRM/TTV-AB v12.0.1-12.0.8 — issue #249): since
-    // July 2026 Twitch renders standalone <video> ad elements beside the player and in chat
-    // — a second "player" with a Play-ad button. They are delivered outside the m3u8, so
-    // neither segment stripping nor backup-swapping touches them.
-    // Matched ONLY on the Amazon ad-CDN host. That is the safety property: the live stream is
-    // fed by MediaSource and always carries a blob: URL, so the primary player can never match
-    // this test. The player-owned element is skipped as a second, independent guard.
-    // Muted + paused as well as hidden — a display:none <video> still plays audio (TTV-AB v12.0.7).
+    // Since July 2026 Twitch renders standalone <video> ads beside the player and in chat (#249),
+    // outside the m3u8. Matched only on the Amazon ad-CDN host: the live stream plays from a
+    // MediaSource blob: URL, so the player can't match. Muted and paused too: a display:none
+    // <video> still plays audio.
     const primaryVideo = runtime.playerForMonitoringBuffering?.player?.getHTMLVideoElement?.();
     const allVideos = document.getElementsByTagName('video');
     for (let i = 0; i < allVideos.length; i++) {
@@ -48,24 +36,19 @@ export function hideTwitchAdOverlays() {
             }
         } catch {}
         if (adHost && vid !== primaryVideo) {
-            // Re-assert every tick rather than marking once: a React re-render can drop the
-            // inline style while keeping the element, and a one-shot marker would never re-hide it.
+            // A React re-render can drop the inline style while keeping the element.
             vid.style.setProperty('display', 'none', 'important');
             try {
                 vid.muted = true;
                 if (!vid.paused) vid.pause();
             } catch {}
             if (!vid.dataset.tasAdHidden) {
-                // '1', not '': dataset returns the empty string as-is, which is falsy —
-                // the dedup, the restore branch and getPlayerVideoElement() would all misread it.
                 vid.dataset.tasAdHidden = '1';
                 console.log('[AD DEBUG] Hidden separate Twitch video ad (' + adHost + ') — issue #249');
             }
         } else if (vid.dataset.tasAdHidden && !adHost) {
-            // Twitch RECYCLES <video> nodes: an element that held an ad can later be handed real
-            // content. Without this it would stay display:none + muted forever — invisible content.
-            // Deliberately not gated on the primary check, so an element promoted to primary is
-            // still restored. Mirrors TTV-AB v12.0.2 ("safely restores videos that Twitch reuses").
+            // Twitch reuses <video> nodes: one that held an ad can later get real content, even as the
+            // player's own element.
             delete vid.dataset.tasAdHidden;
             vid.style.removeProperty('display');
             try {
@@ -92,10 +75,8 @@ export function updateAdblockBanner(data: Partial<AdBlockBannerMessage> & { hasA
             adBlockDiv.P = adBlockDiv.querySelector('p');
             playerRootDiv.appendChild(adBlockDiv);
         }
-        // The worker sends this on every playlist poll (~2s), mostly unchanged. Write only what
-        // changed: each textContent assignment replaces the text node and wakes every
-        // MutationObserver on the page (Twitch's and other extensions').
-        // P is missing if the overlay was created by another (older/duplicate) copy of the script.
+        // Sent every playlist poll (~2s), mostly unchanged: each textContent write replaces the text
+        // node and wakes every MutationObserver on the page.
         if (adBlockDiv.P) {
             const text =
                 'Blocking' +

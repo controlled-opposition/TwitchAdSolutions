@@ -2,7 +2,6 @@ import type { PlayerType } from '../shared/types.ts';
 import { state } from './state.ts';
 import { postToPage } from './post.ts';
 
-/** In-flight GQL requests relayed to the page, by request id. Resolved by the worker's FetchResponse handler. */
 export const pendingFetchRequests = new Map<
     string,
     {
@@ -12,7 +11,6 @@ export const pendingFetchRequests = new Map<
     }
 >();
 
-// Request a playback access token from Twitch GQL using the given player type
 export function getAccessToken(channelName: string, playerType: PlayerType): Promise<Response> {
     const body = {
         operationName: 'PlaybackAccessToken',
@@ -33,8 +31,6 @@ export function getAccessToken(channelName: string, playerType: PlayerType): Pro
     };
     return gqlRequest(body);
 }
-// Send a GQL request to Twitch via the main thread (workers can't make credentialed requests)
-/** @param body GQL operation, or a batch of them */
 export function gqlRequest(body: object | object[]): Promise<Response> {
     if (!state.GQLDeviceID) {
         state.GQLDeviceID = '';

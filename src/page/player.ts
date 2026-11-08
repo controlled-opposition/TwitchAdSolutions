@@ -5,9 +5,8 @@ import { postTwitchWorkerMessage } from './workers.ts';
 import { startDriftCorrection } from './drift.ts';
 import { PRESERVED_PLAYER_SETTINGS } from './storage.ts';
 
-// Apple touch-device detection. iPadOS 13+ reports navigator.platform 'MacIntel' with a desktop
-// Safari UA — distinguished from a real Mac only by touch support (real Macs report maxTouchPoints 0).
-// iPhone/iPod/older iPadOS report platform directly.
+// iPadOS 13+ reports navigator.platform 'MacIntel' like a Mac; only touch support (Macs report
+// maxTouchPoints 0) tells them apart. iPhone/iPod/older iPadOS report their own platform.
 const isAppleTouchDevice = (function () {
     try {
         const p = navigator.platform || '';
@@ -17,10 +16,8 @@ const isAppleTouchDevice = (function () {
         return false;
     }
 })();
-// On Apple touch devices a hard reload re-instantiates the media element (setSrc isNewMediaPlayerInstance),
-// which iOS/iPadOS treats as not user-gesture-"blessed" → play() is rejected → black frame + native play
-// icon the user must tap (issue: iPad ad black-screen). Downgrade hard reloads to soft so the existing
-// blessed element is reused and resumes without a tap. Opt-out: twitchAdSolutions_iosSoftReload=false.
+// On Apple touch devices a hard reload's new media element isn't user-gesture-blessed, so iOS
+// rejects play(): black frame plus a native play icon to tap. Hard reloads are downgraded to soft.
 const iosSoftReload =
     isAppleTouchDevice &&
     (function () {
@@ -30,25 +27,17 @@ const iosSoftReload =
             return true;
         }
     })();
-/**
- * What doTwitchPlayerTask did: `done` (the pause/play or reload happened), `skipped-healthy`
- * (a reload skipped because the player is playing near live), `not-done` (no player, paused,
- * or downgraded to pause/play for PiP).
- */
 export type PlayerTaskOutcome = 'done' | 'skipped-healthy' | 'not-done';
 
-/** Within this long of our own pause/play, a still-paused player is retried with play(). */
 const SCRIPT_PAUSE_RETRY_MS = 10000;
 
-/** Seconds the element is behind the end of its seekable range, or null when unknown. */
 function liveLatency(video: HTMLVideoElement): number | null {
     try {
         if (video.seekable && video.seekable.length > 0) {
             const seekableEnd = video.seekable.end(video.seekable.length - 1);
             if (Number.isFinite(seekableEnd)) {
                 const latency = Math.max(0, seekableEnd - video.currentTime);
-                // Sanity cap: values >1h indicate garbage from the Media Source API
-                // (seen right after a reload while the seekable range is in a transient state).
+                // Right after a reload the seekable range can end at garbage; cap at 1h.
                 if (latency < 3600) {
                     return latency;
                 }
@@ -58,7 +47,6 @@ function liveLatency(video: HTMLVideoElement): number | null {
     return null;
 }
 
-// Pause/play or fully reload the Twitch player, preserving quality/volume settings
 export function doTwitchPlayerTask(task: 'pausePlay' | 'reload', reloadKind?: ReloadKind): PlayerTaskOutcome {
     const playerAndState = getPlayerAndState();
     if (!playerAndState) {
@@ -77,7 +65,6 @@ export function doTwitchPlayerTask(task: 'pausePlay' | 'reload', reloadKind?: Re
     }
     const wasPaused = player.isPaused() || player.core?.paused;
     if (wasPaused) {
-        // User deliberately paused — respect their intent, don't auto-resume
         if (playerBufferState.userPauseIntent) {
             if (!playerBufferState.loggedPauseIntent) {
                 playerBufferState.loggedPauseIntent = true;
@@ -85,34 +72,31 @@ export function doTwitchPlayerTask(task: 'pausePlay' | 'reload', reloadKind?: Re
             }
             return 'not-done';
         }
-        // If WE recently called pause/play and player is still paused, retry play (stuck from autoplay policy or ad-state interference)
-        if (playerBufferState.weJustPaused && Date.now() - playerBufferState.weJustPaused < SCRIPT_PAUSE_RETRY_MS) {
+        // Recently paused/played by us and still paused: autoplay policy may have blocked play().
+        if (playerBufferState.scriptPausedAt && Date.now() - playerBufferState.scriptPausedAt < SCRIPT_PAUSE_RETRY_MS) {
             try {
                 player.play()?.catch?.(() => {});
             } catch {}
         }
         return 'not-done';
     }
-    playerBufferState.weJustPaused = 0;
+    playerBufferState.scriptPausedAt = 0;
     playerBufferState.lastFixTime = Date.now();
     playerBufferState.stall.frozenTicks = 0;
     if (task === 'pausePlay') {
         player.pause();
         player.play()?.catch?.(() => {});
-        playerBufferState.weJustPaused = Date.now();
+        playerBufferState.scriptPausedAt = Date.now();
         return 'done';
     }
     if (document.pictureInPictureElement) {
-        // Downgrade to pause/play to preserve PiP — setSrc exits PiP
+        // setSrc exits PiP.
         player.pause();
         player.play()?.catch?.(() => {});
         console.log('[AD DEBUG] Downgraded reload to pause/play to preserve PiP');
         return 'not-done';
     }
-    // Skip reload if the player is already healthy — avoids disrupting smooth playback.
-    // But if we're way behind live edge (e.g. after a long ad break), proceed with reload to reset latency.
-    // A codec-swap reload is never skipped: it isn't a recovery, it moves the player onto the
-    // AVC master playlist, and only a reload makes the player fetch it.
+    // Only a reload makes Twitch's player fetch the AVC master, so a codec-swap reload is never skipped.
     const video = player.getHTMLVideoElement?.();
     if (reloadKind !== 'codec-swap' && video && video.readyState >= 3 && !video.paused && !video.ended) {
         const latencySec = liveLatency(video);
@@ -149,20 +133,13 @@ export function doTwitchPlayerTask(task: 'pausePlay' | 'reload', reloadKind?: Re
         }
     } catch {}
     playerBufferState.lastReloadAt = Date.now();
-    playerBufferState.adStall = { phase: 'idle' }; // clear stale stall timer so post-reload readyState=0 isn't attributed to pre-reload stall
+    playerBufferState.adStall = { phase: 'idle' };
     playerBufferState.userPauseIntent = false;
     playerBufferState.loggedPauseIntent = false;
-    // playerForMonitoringBuffering re-acquired fresh every tick — no manual invalidation needed
-    // Hard reload for 'early' (mid-break escape — fresh session gets new ad-decision bucket).
-    // Soft reload for 'post-ad' (smooth transition, no black screen teardown).
-    // Apple touch devices: force soft — a new media instance needs a user tap to resume (black-screen + play icon).
+    // A hard reload starts a fresh session, which gets a new ad decision.
     const hardReload = reloadKind === 'early' && !iosSoftReload;
-    // Decoupled from hardReload on purpose. The iOS downgrade below exists to keep the
-    // media element user-gesture-blessed, which only requires skipping the new media
-    // instance — not the token refresh. An 'early' reload after an autoplay commit
-    // depends on refreshAccessToken to leave the autoplay-scoped 360p variant ladder;
-    // without it an iOS user stays pinned at 360p, since 'early' is always downgraded
-    // here and 'post-ad' is soft by definition, so nothing refreshes the token again.
+    // Not tied to hardReload: iOS only needs the media instance kept, and leaving autoplay's 360p
+    // ladder needs the token refresh, which nothing else would do on iOS.
     const refreshToken = reloadKind === 'early';
     if (reloadKind === 'early' && iosSoftReload) {
         console.log(
@@ -170,35 +147,22 @@ export function doTwitchPlayerTask(task: 'pausePlay' | 'reload', reloadKind?: Re
         );
     }
     console.log('[AD DEBUG] Reloading Twitch player' + (hardReload ? ' (hard)' : ' (soft)'));
-    // Pre-mute through hard reload to hide the MediaSource-teardown audio click.
-    // New MSE initialization crosses a discontinuity boundary that produces an
-    // audible pop on first frames. Restored on `canplay` (audio decodable) with a
-    // 1500ms safety cap. Skipped if user was already muted (preserves intent).
-    // Existing 3000ms LS-restore timer below acts as ultimate backstop.
+    // Pre-mute through a hard reload: the new MSE initialization crosses a discontinuity and pops.
     if (hardReload) {
         try {
             armMuteRestore();
         } catch {}
     }
-    // Set weJustPaused so the pause-listener filters out the MSE-teardown
-    // pause event that Twitch dispatches on the old <video> during setSrc.
-    // Without this, userPauseIntent would falsely flip to true during the
-    // reload window, blocking the 5500ms backstop's unmute on stuck-muted
-    // recovery (issue #200 follow-up). Reuses the existing 2s pause-listener
-    // guard.
-    // refreshToken as well as hardReload: a token refresh swaps the source even when
-    // the media instance is reused (the iOS downgrade), so Twitch can still dispatch
-    // the teardown pause. Unarmed, that reads as userPauseIntent and suppresses the
-    // unmute backstop — muted stream on exactly the devices this path targets.
+    // Twitch dispatches a pause on the old <video> during setSrc, also when a token refresh reuses
+    // the media instance; scriptPausedAt keeps it from reading as userPauseIntent, which would block
+    // the unmute backstop (issue #200).
     if (hardReload || refreshToken) {
-        playerBufferState.weJustPaused = Date.now();
+        playerBufferState.scriptPausedAt = Date.now();
     }
     playerState.setSrc({ isNewMediaPlayerInstance: hardReload, refreshAccessToken: refreshToken });
     postTwitchWorkerMessage('TriggeredPlayerReload');
     player.play()?.catch?.(() => {});
-    // Always restore muted/volume state after reload — Chrome autoplay policy can force muted.
-    // Block must always run: if Twitch hasn't written LS values yet (fresh session, private mode,
-    // cleared cache), the video still needs unmute after Chrome's autoplay mute on reload.
+    // Chrome's autoplay policy can mute the player on reload, even with no Twitch volume keys saved yet.
     setTimeout(() => {
         try {
             for (const { key, restoreEmpty } of PRESERVED_PLAYER_SETTINGS) {
@@ -207,21 +171,13 @@ export function doTwitchPlayerTask(task: 'pausePlay' | 'reload', reloadKind?: Re
                     localStorage.setItem(key, value);
                 }
             }
-            // The player's own element, not a separate Twitch ad <video> (#249).
             const video = getPlayerVideoElement();
-            // Respect user's mute intent: only force-unmute if LS didn't say mute.
-            // Twitch writes video-muted as '{"default":true}' when user muted via UI;
-            // Chrome autoplay policy can mute even if user didn't (no LS signal).
+            // Twitch saves video-muted as '{"default":true}' when the user mutes in its UI.
             const savedMuted = savedSettings.get('video-muted');
             const userIntendedMute = savedMuted && savedMuted.includes('"default":true');
             if (video && video.muted && !userIntendedMute) {
                 video.muted = false;
             }
-            // Correct live drift after reload.
-            // For hard reload with large drift (>5s), hard-seek to live edge to flush
-            // any A/V timestamp desync from strip+BLANK_MP4+recovery activity. Drift
-            // correction at 1.1x would take minutes to catch up 30-60s of drift.
-            // For soft reload or small drift, use existing gradual catch-up.
             if (video && video.buffered.length > 0 && video.readyState >= 3) {
                 const liveEdge = video.buffered.end(video.buffered.length - 1);
                 const drift = liveEdge - video.currentTime;
@@ -242,18 +198,8 @@ export function doTwitchPlayerTask(task: 'pausePlay' | 'reload', reloadKind?: Re
     return 'done';
 }
 
-// Mute handling around a hard reload: pre-mute to hide the MediaSource-teardown audio click,
-// unmute when the new element can play (canplay / playing / loadeddata on any <video>, or 4s at
-// the latest), then a 5.5s backstop against Twitch's own LS-restore re-muting.
-//
-//     (none) ──hard reload──▶ awaiting-media ──media event / 4s──▶ backstop ──5.5s──▶ (none)
-//
-// One instance at a time: a hard reload that starts while another one's restore is pending
-// takes it over. The element is then muted by our own pre-mute, so without the handover the new
-// reload would read it as a user mute and never unmute.
 interface MuteRestore {
     phase: 'awaiting-media' | 'backstop';
-    /** The element(s) we muted, so a pre-mute left on an element that isn't the player's can be undone. */
     premuted: HTMLVideoElement[];
     cancel(): void;
 }
@@ -266,28 +212,17 @@ function armMuteRestore() {
     const v = getPlayerVideoElement();
     if (!v) return;
     const premuted = prev && prev.phase === 'awaiting-media' ? prev.premuted.slice() : [];
-    // Muted only by our own earlier pre-mute counts as unmuted.
     const wasInitiallyUnmuted = !v.muted || premuted.includes(v);
-    // Issue #200 fix: also set up restore+backstop when the element is already
-    // muted IF vaft has successfully unmuted at any point earlier this session.
-    // Strong signal of Twitch's silent re-mute pattern (confirmed via v633
-    // diagnostic logs) rather than user-initiated mute. Without this, AFK
-    // users come back to persistently-muted streams (Tgod1991 on v635). First-
-    // session-mute users have vaftEverUnmuted=false → backstop never engages
-    // → mute respected. Disabled by twitchAdSolutions_recoverFromSilentMute=
-    // false for users who deliberately mute mid-session.
+    // Issue #200: Twitch silently re-mutes after reloads, so once vaft has unmuted this session an
+    // already-muted element is treated as that re-mute, not the user's.
     const shouldRecover = playerBufferState.vaftEverUnmuted && state.RecoverFromSilentMute;
     if (!wasInitiallyUnmuted && !shouldRecover) return;
     if (!v.muted) {
         v.muted = true;
         premuted.push(v);
     }
-    // Undo OUR pre-mute where it landed on an element other than `cur`. `cur` is whichever
-    // <video> is first in the DOM — not necessarily the one we muted, now that Twitch renders
-    // extra <video> elements for side/chat ads (#249), and Firefox's PiP is browser-native so
-    // the document.pictureInPictureElement reload guard never fires there (#248). Only ever
-    // clears a mute we set, so it can never unmute an ad video. No-op on a normal hard reload,
-    // where the old element is disconnected.
+    // `cur` may not be the element we muted: Twitch adds ad <video>s (#249), and Firefox's built-in
+    // PiP never sets document.pictureInPictureElement, so the PiP reload guard doesn't fire there (#248).
     const clearLeakedPremutes = (cur: HTMLVideoElement | null, where: string) => {
         for (const el of premuted) {
             if (el !== cur && el.isConnected && el.muted) {
@@ -300,10 +235,9 @@ function armMuteRestore() {
             }
         }
     };
-    // setSrc({isNewMediaPlayerInstance:true}) replaces the <video> element, so a listener on
-    // `v` never fires. Listen on document (capture phase) for whichever <video> Twitch attaches
-    // the new MediaSource to. Edge dispatches loadeddata / playing independently of canplay,
-    // and any of them means the new element is ready for unmute.
+    // setSrc({isNewMediaPlayerInstance:true}) replaces the <video>, so a listener on `v` never fires:
+    // listen on document for whichever <video> gets the new MediaSource. Edge fires loadeddata and
+    // playing independently of canplay.
     const listener = (e: Event) => {
         if (e.target && (e.target as Element).tagName === 'VIDEO') restore();
     };
@@ -326,10 +260,8 @@ function armMuteRestore() {
             clearLeakedPremutes(cur, 'Restore');
         } catch {}
     };
-    // Final backstop: if the player ends up muted at 5500ms despite our restore (Twitch's own
-    // LS-restore at ~3000ms can re-mute if the captured pre-reload muted snapshot was true),
-    // force one more unmute. Skipped if the user paused (pause+mute are correlated by Twitch's
-    // player code, so userPauseIntent is a cheap proxy for a deliberate mute).
+    // Twitch's own localStorage restore (~3000ms) can re-mute the player. Twitch's player correlates
+    // pause and mute, so userPauseIntent stands in for a deliberate mute.
     const backstop = () => {
         restore();
         if (muteRestore === instance) muteRestore = null;
@@ -360,7 +292,7 @@ function armMuteRestore() {
     document.addEventListener('canplay', listener, true);
     document.addEventListener('playing', listener, true);
     document.addEventListener('loadeddata', listener, true);
-    // 4000ms (was 2500ms) for Edge slow MSE init — issue #200 follow-up.
+    // 4000ms: Edge's MSE initialization is slow (issue #200).
     const restoreTimer = setTimeout(restore, 4000);
     const backstopTimer = setTimeout(backstop, 5500);
     const instance: MuteRestore = {

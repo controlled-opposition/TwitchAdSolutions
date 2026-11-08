@@ -14,9 +14,6 @@ export function pruneStreamInfos() {
             delete state.StreamInfos[channelName];
         }
     }
-    // A stream restart replaces the channel's StreamInfo, and the old one's variant URLs stay in
-    // StreamInfosByUrl (the loop above only reaches the current one's). Drop every entry that no
-    // longer points at its channel's live StreamInfo, so replaced ones can be collected.
     for (const url in state.StreamInfosByUrl) {
         const streamInfo = state.StreamInfosByUrl[url];
         if (state.StreamInfos[streamInfo.ChannelName] !== streamInfo) {
@@ -24,41 +21,30 @@ export function pruneStreamInfos() {
         }
     }
 }
-// Creates a new StreamInfo with the full field shape declared up-front.
-// When adding a new streamInfo field, declare it here with an appropriate
-// zero value so the complete shape is visible in one place. Per-break state lives in
-// AdBreak (createAdBreak() in ad-break.ts), not here.
 export function createStreamInfo(channelName: string, encodingsM3u8: string, usherParams: string): StreamInfo {
     return {
-        // Identity / lifecycle
         ChannelName: channelName,
         LastSeenAt: Date.now(),
         EncodingsM3U8: encodingsM3u8,
         UsherParams: usherParams,
-        // Resolutions / URL map
-        Urls: Object.create(null), // xxx.m3u8 -> { Resolution: "284x160", FrameRate: 30.0 }
-        // Codec swap
+        Urls: Object.create(null),
         ModifiedM3U8: null,
         CodecSwap: 'native',
         Break: null,
         ConsecutiveZeroStripBreaks: 0,
-        LastAdCachePruneAt: 0, // stripAdSegments: last AdSegmentCache prune (throttled to once per 60s)
-        // Clean playlist snapshot for all-stripped recovery (mirrors TTV-AB)
+        LastAdCachePruneAt: 0,
         LastCleanNativeM3U8: null,
         LastCleanNativePlaylistAt: 0,
-        // Backup player types, across breaks
-        BackupEncodingsM3U8Cache: Object.create(null), // player type -> encodings m3u8 (null once used)
+        BackupEncodingsM3U8Cache: Object.create(null),
         PinnedBackupPlayerType: null,
         SourceTierExhausted: false,
         FastAutoplayWins: 0,
-        // Last player reload (post-ad re-entry guards, minimal-request window)
         LastPlayerReload: 0,
-        ReloadPending: false, // the page reloaded; the next poll stamps LastPlayerReload
-        // Diagnostics
+        ReloadPending: false,
         HasCheckedUnknownTags: false,
-        LoggedOfflineTransition: false, // Set when the m3u8 turns offline-shaped mid-session.
-        ConsecutiveTokenFetchFailures: 0, // Consecutive failed access-token fetches across player types. Logged at threshold, reset on success.
-        LoggedTokenFailureStreak: false, // Once-per-streak guard for the threshold log.
+        LoggedOfflineTransition: false,
+        ConsecutiveTokenFetchFailures: 0,
+        LoggedTokenFailureStreak: false,
         LoggedAdCacheSize1k: false,
     };
 }

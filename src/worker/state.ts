@@ -1,17 +1,10 @@
-// Worker-side settings and state. One instance per injected worker (each worker runs its own
-// copy of the worker bundle).
 import { defaultSharedConfig } from '../shared/config.ts';
 import type { PlayerType, StreamInfo } from '../shared/types.ts';
 
 function createWorkerState() {
     return {
         ...defaultSharedConfig(),
-        // 'twitch-stitched' catches the twitch-stitched-* DATERANGE class family
-        // (-ad, -mid, -pod, etc.) without requiring an exact -ad suffix. Twitch-
-        // prefixed so we don't re-introduce the PR #120 false-positive from bare
-        // 'stitched' substring match. The specific twitch-stitched-ad DATERANGE
-        // marker is a subset of this prefix.
-        /** Substrings that mark an m3u8 as carrying ads. */
+        // Twitch's twitch-stitched-* DATERANGE classes; a bare 'stitched' gave false positives (PR #120).
         AdSignifiers: [
             'stitched-ad',
             'EXT-X-CUE-OUT',
@@ -19,43 +12,29 @@ function createWorkerState() {
             'EXT-X-DATERANGE:CLASS="twitch-maf-ad"',
             'EXT-X-DATERANGE:CLASS="twitch-trigger"',
         ],
-        // DATERANGE classes confirmed as session/source metadata over weeks of field
-        // observation — surface as "candidates" otherwise. Filtered out by the candidate
-        // logger so the diagnostic stays focused on genuinely new markers.
+        // Twitch DATERANGE classes seen on non-ad playlists; the unknown-marker log skips them.
         KnownNonAdSignifiers: ['twitch-session', 'twitch-stream-source', 'twitch-ad-quartile', 'twitch-assignment'],
-        /** Segment URL substrings that identify ad segments. */
         AdSegmentURLPatterns: ['/adsquared/', '/_404/', '/processing'],
-        // Precompiled regexes shared across the stripAdSegments hot path, so literals
-        // inside the per-line strip loop don't recompile on every iteration — for
-        // a 100-line m3u8 at ~2 polls/sec during an ad break, hoisting the URL
-        // rewrite alone saves ~200 regex compilations per second.
         TwitchAdUrlRewriteRegex: /(X-TV-TWITCH-AD(?:-[A-Z]+)*-URLS?=")[^"]*(")/g,
         UriAttributeRegex: /URI="([^"]+)"/,
         ClientID: 'kimne78kx3ncx6brgo4mv6wki5h1ko',
-        /** Player types tried, in order, when searching for an ad-free backup stream. */
         BackupPlayerTypes: [
-            // Order matters: first clean type wins. 'embed' moved to end — field-observed
-            // Twitch returns GQL 'server error' for streamPlaybackAccessToken on embed when
-            // requested from twitch.tv origin, wasting ~200-400ms per break as first-try.
-            // Kept in case it ever succeeds on some channel/user combo.
+            // First clean type wins. Twitch's GQL answers 'server error' to embed tokens requested
+            // from twitch.tv, so embed goes last.
             'site', //Source
             'popout', //Source
             'mobile_web', //Mobile
-            'embed', //Source (unreliable — see note above)
-            // 'autoplay' (360p) removed: when committed as cycle backup, the player gets stuck
-            // in an endless loading circle after the CSAI-only path releases the backup —
-            // autoplay variants don't transition cleanly back to main stream variants.
+            'embed', //Source
+            // Not 'autoplay': committed as a backup, the player loops a loading circle once the
+            // backup is released, since autoplay variants don't transition back to the main stream's.
         ] as PlayerType[],
-        FallbackPlayerType: 'site' as PlayerType, // was 'embed' — site is more reliable when all Source types end up ad-laden
+        FallbackPlayerType: 'site' as PlayerType, // more reliable than embed when every Source type is ad-laden
         PlayerReloadMinimalRequestsTime: 1500,
-        PlayerReloadMinimalRequestsPlayerIndex: 2, //autoplay
-        /** Channel name -> stream state. */
+        PlayerReloadMinimalRequestsPlayerIndex: 2,
         StreamInfos: Object.create(null) as Record<string, StreamInfo>,
-        /** Variant playlist URL -> owning stream state. */
         StreamInfosByUrl: Object.create(null) as Record<string, StreamInfo>,
         SimulatedAdsDepth: 0,
         V2API: false,
-        /** Ad segment URL -> time it was cached (ms). The worker fetch hook answers these with a blank MP4. */
         AdSegmentCache: new Map<string, number>(),
         AllSegmentsAreAdSegments: false,
         StreamInfoMaxAgeMs: 30 * 60 * 1000,

@@ -7,11 +7,9 @@ export function hasAdTags(textStr: string): boolean {
 export function getMatchedAdSignifiers(textStr: string): string[] {
     return state.AdSignifiers.filter((s) => textStr.includes(s));
 }
-// Remove ad segments from an m3u8 playlist and cache their URLs for replacement
 function matchesAdUrlPattern(url: string): boolean {
     return state.AdSegmentURLPatterns.some((p) => url.includes(p));
 }
-// A URL already blanked this session, or one that looks like ad media.
 function isKnownAdUrl(url: string): boolean {
     return !!url && (state.AdSegmentCache.has(url) || matchesAdUrlPattern(url));
 }
@@ -19,8 +17,6 @@ function isKnownAdUrl(url: string): boolean {
 function isLowLatencyHint(line: string): boolean {
     return line.startsWith('#EXT-X-TWITCH-PREFETCH:') || line.startsWith('#EXT-X-PRELOAD-HINT:');
 }
-// Called on every ad-marked poll of a break. Updates the break's strip and freeze state (`brk`);
-// `streamInfo` supplies the clean-playlist snapshot and the cache-prune throttle.
 export function stripAdSegments(
     textStr: string,
     stripAllSegments: boolean,
@@ -32,7 +28,6 @@ export function stripAdSegments(
     const liveSegments = [];
     const lines = textStr.split(/\r?\n/);
     const newAdUrl = 'https://twitch.tv';
-    // Log ad tracking attribute names once per break (helps identify new beacons)
     if (!brk.LoggedAdAttributes) {
         const adAttrs = textStr.match(/X-TV-TWITCH-AD[A-Z-]*(?==")/g);
         if (adAttrs && adAttrs.length > 0) {
@@ -40,7 +35,6 @@ export function stripAdSegments(
             console.log('[AD DEBUG] Ad tracking attributes seen: ' + [...new Set(adAttrs)].join(', '));
         }
     }
-    // Log potential ad markers that aren't in AdSignifiers (candidates for future inclusion)
     if (!brk.LoggedUnknownSignifiers) {
         const candidates = new Set<string>();
         for (const sm of textStr.matchAll(/EXT-X-DATERANGE:[^\n]*CLASS="(twitch-[^"]+)"/g)) {
@@ -49,9 +43,6 @@ export function stripAdSegments(
         for (const sm of textStr.matchAll(/(SCTE35-[A-Z-]+|EXT-X-CUE-[A-Z-]+)/g)) {
             candidates.add(sm[1]);
         }
-        // Substring check (not exact): a candidate is "known" if any AdSignifier
-        // appears within it. This handles prefix signifiers like 'twitch-stitched'
-        // covering 'EXT-X-DATERANGE:CLASS="twitch-stitched-ad"' etc.
         const unknown = [...candidates].filter(
             (c) =>
                 !state.AdSignifiers.some((s) => s && c.includes(s)) &&
@@ -68,7 +59,6 @@ export function stripAdSegments(
     }
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
-        // Track SCTE-35 CUE-OUT/CUE-IN ad boundaries
         if (line.includes('EXT-X-CUE-OUT')) {
             if (!inCueOut) {
                 console.log('[AD DEBUG] SCTE-35 CUE-OUT — ad boundary entered');
@@ -81,7 +71,6 @@ export function stripAdSegments(
             inCueOut = false;
         }
         // Remove tracking urls which appear in the overlay UI
-        // The rewrite regex needs this literal to match; skip the regex on the (many) lines without it.
         if (line.includes('X-TV-TWITCH-AD')) {
             lines[i] = line.replaceAll(state.TwitchAdUrlRewriteRegex, `$1${newAdUrl}$2`);
         }
@@ -103,9 +92,7 @@ export function stripAdSegments(
                 liveSegments.push({ extinf: line, url: segmentUrl });
             }
         } else if (line.startsWith('#EXT-X-PART:')) {
-            // LL-HLS part: URI is inline as an attribute. Strip if it matches a known
-            // ad URL (already in cache from a parallel EXTINF strip, or matches a URL pattern).
-            // Without this, the player may use the parts path to fetch ad media via low-latency.
+            // LL-HLS part: the URI is an inline attribute, and the player can fetch ad media through it.
             const partUriMatch = line.match(state.UriAttributeRegex);
             const partUri = partUriMatch ? partUriMatch[1] : '';
             if (isKnownAdUrl(partUri)) {
@@ -114,16 +101,10 @@ export function stripAdSegments(
                 hasStrippedAdSegments = true;
             }
         } else if (isLowLatencyHint(line)) {
-            // LL-HLS prefetch/preload hints can point at upcoming ad segments before any
-            // EXTINF line or ad signifier has materialized in the playlist. If we only
-            // strip prefetch hints AFTER hasStrippedAdSegments is set, the first poll of
-            // an ad break can leak a prefetch hint pointing at an ad URL — the player
-            // then pre-fetches ad media via the LL-HLS path before our usual strip catches
-            // up, producing an ad flash. Detect the ad URL here so hasStrippedAdSegments
-            // flips on the first poll and the post-loop unconditional prefetch strip fires.
-            // Ported from TTV-AB 52b41b4.
-            // Format: '#EXT-X-TWITCH-PREFETCH:https://url/here.ts' (raw URL after the colon)
-            //     or: '#EXT-X-PRELOAD-HINT:TYPE=PART,URI="url"' (URI attribute)
+            // LL-HLS hints can point at upcoming ad segments before any EXTINF or ad signifier shows,
+            // so the first poll of a break could prefetch ad media. Formats:
+            //   '#EXT-X-TWITCH-PREFETCH:https://url/here.ts'
+            //   '#EXT-X-PRELOAD-HINT:TYPE=PART,URI="url"'
             let hintUrl = '';
             if (line.startsWith('#EXT-X-TWITCH-PREFETCH:')) {
                 hintUrl = line.substring('#EXT-X-TWITCH-PREFETCH:'.length).trim();
@@ -137,11 +118,6 @@ export function stripAdSegments(
             }
         }
     }
-    // Moved out of the per-line loop: a per-line scan for any signifier is
-    // semantically equivalent to a single full-text scan, since the check has
-    // no line-level state — it just flips hasStrippedAdSegments = true on first
-    // match. One scan instead of N_lines * N_signifiers scans (~100x fewer
-    // includes() calls on a typical 100-line m3u8).
     if (!hasStrippedAdSegments && hasAdTags(textStr)) {
         hasStrippedAdSegments = true;
     }
@@ -153,10 +129,8 @@ export function stripAdSegments(
             }
         }
     }
-    // brk.StrippedSegments is not reset on a poll that strips nothing: it is the break's total,
-    // which decides whether the end-of-break reload has to flush the MediaSource.
-    // Cache live segments for recovery (plus the MEDIA-SEQUENCE of the oldest cached segment,
-    // so the player accepts injected recovery segments as the correct position in the stream)
+    // Recovery segments carry the MEDIA-SEQUENCE of the oldest cached one, so the player accepts them
+    // at the right position in the stream.
     if (liveSegments.length > 0) {
         brk.RecoverySegments = liveSegments.slice(-6);
         const seq = parseInt((textStr.match(/#EXT-X-MEDIA-SEQUENCE:(\d+)/) || [])[1], 10);
@@ -164,23 +138,13 @@ export function stripAdSegments(
             brk.RecoveryStartSeq = seq + Math.max(0, liveSegments.length - brk.RecoverySegments.length);
         }
     }
-    // If all segments were stripped, try to prevent black screen via recovery content.
-    // Prefer the full-playlist snapshot from a recent non-ad poll (mirrors TTV-AB
-    // LastCleanNativeM3U8 approach) — gives the player 4-6 live segments worth of
-    // content vs the thin per-segment recovery cache. Falls back to the per-segment
-    // cache if the snapshot is stale or missing.
     if (hasStrippedAdSegments && liveSegments.length === 0) {
         brk.ConsecutiveAllStrippedPolls++;
         brk.TotalAllStrippedPolls++;
         if (!brk.FreezeStartedAt) brk.FreezeStartedAt = Date.now();
-        // Primary: fresh full-playlist snapshot (< 1.5s old, must not itself contain ad markers)
         const snapshotAge = streamInfo.LastCleanNativePlaylistAt
             ? Date.now() - streamInfo.LastCleanNativePlaylistAt
             : Infinity;
-        // Post-ad re-entry guard (mirrors TTV-AB v9.1.3): on a consecutive break that re-enters
-        // within the 8s post-ad reload window, the snapshot can straddle the end-of-break reload
-        // boundary and replay stale content from the previous cycle. Skip it and fall through to
-        // the per-segment recovery cache, which is rebuilt from the current break's polls.
         const recentReloadReentry = streamInfo.LastPlayerReload && Date.now() - streamInfo.LastPlayerReload < 8000;
         if (
             streamInfo.LastCleanNativeM3U8 &&
@@ -194,7 +158,6 @@ export function stripAdSegments(
             brk.IsStripping = hasStrippedAdSegments;
             return streamInfo.LastCleanNativeM3U8;
         }
-        // Fallback: per-segment recovery cache, built from this break's polls
         if (brk.RecoverySegments.length > 0) {
             console.log(
                 '[AD DEBUG] All segments stripped — restoring ' + brk.RecoverySegments.length + ' recovery segments',
@@ -213,14 +176,11 @@ export function stripAdSegments(
             }
         }
     } else if (liveSegments.length > 0) {
-        // Reset freeze counter when live segments are available
         brk.ConsecutiveAllStrippedPolls = 0;
     }
     brk.IsStripping = hasStrippedAdSegments;
     const now = Date.now();
-    // Throttle cache prune to once per 60s. The 120s TTL gives plenty of headroom
-    // and scanning the full cache on every m3u8 poll adds up during heavy ad break
-    // sequences (LL-HLS can poll multiple times per second). Ported from TTV-AB.
+    // LL-HLS can poll several times a second; prune at most once per 60s.
     if (!streamInfo.LastAdCachePruneAt || now - streamInfo.LastAdCachePruneAt > 60000) {
         streamInfo.LastAdCachePruneAt = now;
         state.AdSegmentCache.forEach((value, key, map) => {
@@ -228,12 +188,7 @@ export function stripAdSegments(
                 map.delete(key);
             }
         });
-        // Bound the cache to prevent unbounded growth on long sessions. Each entry is
-        // a URL string + Date.now() timestamp (~200-300 bytes); over a multi-hour session
-        // with frequent ad breaks, the Map can reach MB-scale. When size > 1000, evict
-        // the oldest 200 entries (Map iteration order is insertion order, so FIFO).
-        // Old ad URLs are unlikely to be requested again; if they are, they'll be
-        // re-cached via the strip path normally.
+        // Map iterates in insertion order, so this evicts the oldest.
         if (state.AdSegmentCache.size > 1000) {
             let evicted = 0;
             for (const url of state.AdSegmentCache.keys()) {
