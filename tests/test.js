@@ -1414,6 +1414,38 @@ asyncTests.push(async () => {
 });
 
 asyncTests.push(async () => {
+    console.log('--- built userscript: reload answers go to the requesting worker ---');
+    if (!existsSync(BUILT)) return;
+    const sent = [];
+    const handlers = [];
+    let pageGlobal;
+    injectWorker(BUILT, {
+        setup(page) {
+            pageGlobal = page;
+            const proto = page.Worker.prototype;
+            proto.postMessage = function (m) {
+                sent.push({ worker: this, m });
+            };
+            const add = proto.addEventListener;
+            proto.addEventListener = function (type, fn) {
+                add.call(this, type, fn);
+                if (type === 'message') handlers.push({ worker: this, fn });
+            };
+        },
+    });
+    const older = handlers[0].worker;
+    new pageGlobal.Worker('blob:https://www.twitch.tv/twitch-worker-2');
+    const newer = handlers.at(-1).worker;
+    assert(older !== newer, 'two workers constructed');
+    for (const h of handlers.filter((h) => h.worker === older)) {
+        h.fn({ data: { key: 'ReloadPlayer', kind: 'early', requestId: 1 } });
+    }
+    const answers = sent.filter((s) => s.m.key === 'ReloadResult');
+    assertEq(answers.length, 1, 'one answer');
+    assert(answers[0]?.worker === older, 'the older worker that asked gets the answer, not the newest');
+});
+
+asyncTests.push(async () => {
     console.log('--- built userscript: nested-frame guard ---');
     if (!existsSync(BUILT)) return;
     const runs = (setup) => {

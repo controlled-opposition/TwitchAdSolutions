@@ -2895,9 +2895,9 @@
               outcome = doTwitchPlayerTask("reload", kind);
             } finally {
               if (requestId) {
-                postTwitchWorkerMessage("ReloadResult", {
-                  requestId,
-                  outcome: outcome === "done" ? "reloaded" : outcome
+                this.postMessage({
+                  key: "ReloadResult",
+                  value: { requestId, outcome: outcome === "done" ? "reloaded" : outcome }
                 });
               }
             }

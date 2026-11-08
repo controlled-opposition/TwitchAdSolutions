@@ -14,7 +14,7 @@ import { updateAdblockBanner } from './overlay.ts';
 import { doTwitchPlayerTask, type PlayerTaskOutcome } from './player.ts';
 import { playerBufferState, runtime, state } from './state.ts';
 import { runWorker } from './worker-bundle.ts';
-import { postTwitchWorkerMessage, twitchWorkers } from './workers.ts';
+import { twitchWorkers } from './workers.ts';
 
 // Markers of other extensions' Worker overrides (TwitchNoSub).
 const workerStringConflicts = [
@@ -152,9 +152,9 @@ export function hookWindowWorker() {
                         outcome = doTwitchPlayerTask('reload', kind);
                     } finally {
                         if (requestId) {
-                            postTwitchWorkerMessage('ReloadResult', {
-                                requestId,
-                                outcome: outcome === 'done' ? 'reloaded' : outcome,
+                            this.postMessage({
+                                key: 'ReloadResult',
+                                value: { requestId, outcome: outcome === 'done' ? 'reloaded' : outcome },
                             });
                         }
                     }
