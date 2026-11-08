@@ -308,7 +308,10 @@ async function searchBackup(
                 isFreshM3u8 = true;
                 backupColdTokenFetches++;
                 const fetched = await fetchBackupEncodings(streamInfo, brk, playerType, realFetch);
+                // A token missing from a 200 answer can be transient: retry once, and count the type as
+                // failed only if the retry misses too.
                 if (fetched === 'missing-token') {
+                    if (i === 1) recordTokenFetchFailure(streamInfo, brk, playerType);
                     continue;
                 }
                 encodingsM3u8 = fetched;
@@ -416,7 +419,6 @@ async function fetchBackupEncodings(
                     JSON.stringify(Object.keys(accessToken || {})) +
                     errInfo,
             );
-            recordTokenFetchFailure(streamInfo, brk, playerType);
             return 'missing-token';
         }
         const urlInfo = new URL(

@@ -40,6 +40,7 @@ function mediaPlaylist(seq, { ads = 0, prefix = 'live' } = {}) {
  * @param {Record<string, string>} [spec.localStorage]
  * @param {boolean} [spec.hevc] main stream's top variant is HEVC
  * @param {Record<string, number>} [spec.backupAds] player type -> ad segments in its playlist (default 0 = clean)
+ * @param {string[]} [spec.missingToken] player types whose GQL answer has no streamPlaybackAccessToken
  * @param {object} [spec.console] console for the worker (silent by default)
  * @param {(message: object) => string} [spec.reload] the page's answer to a ReloadPlayer (default: reloaded)
  * @param {Array<{ ads: number, polls: number }>} spec.phases main-stream polls, in order
@@ -55,6 +56,7 @@ export async function runScenario(scriptPath, spec) {
         console: spec.console,
         gql: (body) => {
             const playerType = body?.variables?.playerType;
+            if (spec.missingToken?.includes(playerType)) return { body: JSON.stringify({ data: {} }) };
             return {
                 body: JSON.stringify({
                     data: { streamPlaybackAccessToken: { signature: 'sig-' + playerType, value: 'tok-' + playerType } },

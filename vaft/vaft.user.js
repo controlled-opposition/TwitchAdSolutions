@@ -2272,6 +2272,7 @@
           backupColdTokenFetches++;
           const fetched = await fetchBackupEncodings(streamInfo, brk, playerType, realFetch);
           if (fetched === "missing-token") {
+            if (i === 1) recordTokenFetchFailure(streamInfo, brk, playerType);
             continue;
           }
           encodingsM3u8 = fetched;
@@ -2348,7 +2349,6 @@
         console.log(
           "[AD DEBUG] GQL response missing streamPlaybackAccessToken for " + playerType + ". Response keys: " + JSON.stringify(Object.keys(accessToken || {})) + errInfo
         );
-        recordTokenFetchFailure(streamInfo, brk, playerType);
         return "missing-token";
       }
       const urlInfo = new URL(

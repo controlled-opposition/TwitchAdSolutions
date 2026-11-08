@@ -1431,6 +1431,37 @@ asyncTests.push(async () => {
 });
 
 asyncTests.push(async () => {
+    console.log('--- built userscript: GQL answer without a token ---');
+    if (!existsSync(BUILT)) return;
+    const run = async (missingToken) => {
+        const logs = [];
+        const { transcript } = await runScenario(BUILT, {
+            missingToken,
+            console: { log: (...a) => logs.push(a.join(' ')), info() {}, warn() {}, error() {}, debug() {} },
+            phases: [
+                { ads: 0, polls: 2 },
+                { ads: 4, polls: 1 },
+            ],
+        });
+        const poll = transcript.find((t) => t.label === 'phase 1 poll 0');
+        return {
+            tokenRequests: poll.messages
+                .filter((m) => m.key === 'FetchRequest' && m.url.startsWith('https://gql.twitch.tv/'))
+                .map((m) => JSON.parse(m.body).variables.playerType),
+            source: poll.body.match(/edge\.example\/backup-([^/]+)\//)?.[1],
+            streakLogs: logs.filter((l) => l.includes('times consecutively')),
+        };
+    };
+    const two = await run(['site', 'popout']);
+    assertEq(two.tokenRequests.filter((t) => t === 'site').length, 2, 'a missing token is retried once');
+    assertEq(two.source, 'mobile_web', 'falls through to the next type');
+    assertEq(two.streakLogs.length, 0, 'two failed types are not a streak of three');
+    const three = await run(['site', 'popout', 'mobile_web']);
+    assertEq(three.streakLogs.length, 1, 'three failed types log the streak');
+    assertEq(three.streakLogs[0]?.includes('failed 3 times'), true, 'the streak counts types, not requests');
+});
+
+asyncTests.push(async () => {
     console.log('--- SDA overlay hide ---');
     const writes = [];
     const sda = {
