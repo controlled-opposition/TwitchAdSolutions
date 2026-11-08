@@ -3,6 +3,18 @@ import { maskAsNative } from './mask.ts';
 import { playerBufferState, runtime, state } from './state.ts';
 import { getPlayerVideoElement } from './twitch.ts';
 
+/**
+ * Twitch's player settings in localStorage that survive a player reload: cached by the
+ * localStorage hooks below, and written back after doTwitchPlayerTask's reload. A saved empty
+ * string is written back only when `restoreEmpty` is set.
+ */
+export const PRESERVED_PLAYER_SETTINGS: readonly { key: string; restoreEmpty: boolean }[] = [
+    { key: 'video-quality', restoreEmpty: false },
+    { key: 'video-muted', restoreEmpty: false },
+    { key: 'volume', restoreEmpty: false },
+    { key: 'lowLatencyModeEnabled', restoreEmpty: true }, // Low Latency
+    { key: 'persistenceEnabled', restoreEmpty: true }, // Mini Player
+];
 // Set up visibility overrides and localStorage hooks to preserve player state across reloads
 export function onContentLoaded() {
     if (document.getElementById('seventv-extension')) {
@@ -35,16 +47,9 @@ export function onContentLoaded() {
     document.addEventListener('visibilitychange', visibilityChange);
     // Hooks for preserving volume / resolution
     try {
-        const keysToCache = [
-            'video-quality',
-            'video-muted',
-            'volume',
-            'lowLatencyModeEnabled', // Low Latency
-            'persistenceEnabled', // Mini Player
-        ];
         const cachedValues = new Map();
-        for (let i = 0; i < keysToCache.length; i++) {
-            cachedValues.set(keysToCache[i], localStorage.getItem(keysToCache[i]));
+        for (const { key } of PRESERVED_PLAYER_SETTINGS) {
+            cachedValues.set(key, localStorage.getItem(key));
         }
         const realSetItem = localStorage.setItem;
         const setItemHook = maskAsNative(function (this: Storage, key: string, value: string) {

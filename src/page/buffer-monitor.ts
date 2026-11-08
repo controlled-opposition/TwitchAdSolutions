@@ -20,11 +20,23 @@ const AD_STALL_COOLDOWN_MS = 15000;
 function within(at: number, ms: number): boolean {
     return !!at && Date.now() - at < ms;
 }
-// Visibility listener: installed once; pendingTick dedupes the immediate tick it schedules.
-let visibilityHooked = false;
+/** A tick scheduled by the visibility listener is pending (dedupes repeated events). */
 let pendingTick = false;
+/** Run the first monitor tick, then tick right away whenever the tab becomes visible again. */
+export function startBufferMonitor() {
+    monitorPlayerBuffering();
+    document.addEventListener('visibilitychange', () => {
+        if (!document.hidden && !pendingTick) {
+            pendingTick = true;
+            setTimeout(() => {
+                pendingTick = false;
+                monitorPlayerBuffering();
+            }, 100);
+        }
+    });
+}
 // Poll the player state to detect and fix buffering caused by ad stream switching
-export function monitorPlayerBuffering() {
+function monitorPlayerBuffering() {
     // Fresh player lookup every tick (avoids stale ref when Twitch restarts its own player)
     runtime.playerForMonitoringBuffering = null;
     {
@@ -73,19 +85,6 @@ export function monitorPlayerBuffering() {
         });
     }
     playerBufferState.isLive = isLive;
-    // Force immediate tick when tab becomes visible so stalls are caught fast on return
-    if (typeof document !== 'undefined' && !visibilityHooked) {
-        visibilityHooked = true;
-        document.addEventListener('visibilitychange', () => {
-            if (!document.hidden && !pendingTick) {
-                pendingTick = true;
-                setTimeout(() => {
-                    pendingTick = false;
-                    monitorPlayerBuffering();
-                }, 100);
-            }
-        });
-    }
     // Catch persistent ad-break overlays (e.g. "taking an ad break / stick around")
     // even after hasAds has transitioned to false. updateAdblockBanner only calls
     // hideTwitchAdOverlays during the active ad break; some overlays have their own
@@ -122,11 +121,14 @@ function onChannelChange(channelName: string) {
 // Stall ladder (src/page/stall.ts) and position-jump drift detection. Stands down outside live
 // playback, during ad handling and in the grace windows after reloads and backup switches.
 function checkStall(player: TwitchMediaPlayer, twitchState: TwitchPlayerState) {
+    if (twitchState.props?.content?.type !== 'live' || player.isPaused()) {
+        return;
+    }
+    const video = player.getHTMLVideoElement();
     if (
-        twitchState.props?.content?.type !== 'live' ||
-        player.isPaused() ||
-        player.getHTMLVideoElement()?.ended ||
-        (player.getHTMLVideoElement()?.readyState ?? 0) < 1 ||
+        !video ||
+        video.ended ||
+        (video.readyState ?? 0) < 1 ||
         playerBufferState.lastFixTime > Date.now() - state.PlayerBufferingMinRepeatDelay ||
         runtime.isActivelyStrippingAds ||
         playerBufferState.inAdBreak ||
@@ -159,8 +161,7 @@ function checkStall(player: TwitchMediaPlayer, twitchState: TwitchPlayerState) {
     // the video element is advancing smoothly. Used in the stall trigger below
     // alongside state.position so a real stall (BOTH frozen) is required to
     // fire, not just a batch-update lull in state.position.
-    const videoEl = player.getHTMLVideoElement?.();
-    const videoCurrentTime = videoEl?.currentTime;
+    const videoCurrentTime = video.currentTime;
     if (position === undefined || bufferedPosition === undefined) {
         playerBufferState.stall.frozenTicks = 0;
         return;
@@ -173,13 +174,13 @@ function checkStall(player: TwitchMediaPlayer, twitchState: TwitchPlayerState) {
     // currentTime plateaus and state.position is also at its post-reload reset
     // — exactly the positionFrozen pattern. Detect the swap by element identity
     // and treat it like a fresh reload (start a new recovery window).
-    if (videoEl && playerBufferState.videoElement && playerBufferState.videoElement !== videoEl) {
+    if (playerBufferState.videoElement && playerBufferState.videoElement !== video) {
         resetStallLadder(playerBufferState.stall);
     }
-    playerBufferState.videoElement = videoEl;
+    playerBufferState.videoElement = video;
     const step = stallTick(
         playerBufferState.stall,
-        observeStall(videoEl, position, bufferedPosition, bufferDuration, videoCurrentTime),
+        observeStall(video, position, bufferedPosition, bufferDuration, videoCurrentTime),
         state.PlayerBufferingSameStateCount,
         !state.DisableReloadCap,
     );
@@ -199,8 +200,7 @@ function checkStall(player: TwitchMediaPlayer, twitchState: TwitchPlayerState) {
                 note,
         );
         // Seek past buffer gap instead of stalling + drift to recover
-        const video = player.getHTMLVideoElement?.();
-        if (video && video.buffered.length > 1) {
+        if (video.buffered.length > 1) {
             for (let bi = 0; bi < video.buffered.length; bi++) {
                 if (video.buffered.start(bi) > video.currentTime + 0.5) {
                     console.log(
@@ -214,20 +214,18 @@ function checkStall(player: TwitchMediaPlayer, twitchState: TwitchPlayerState) {
                 }
             }
         }
-        if (video) {
-            console.log(
-                '[AD DEBUG] Video state: readyState=' +
-                    video.readyState +
-                    ' networkState=' +
-                    video.networkState +
-                    ' buffered=' +
-                    (video.buffered.length > 0 ? video.buffered.end(video.buffered.length - 1).toFixed(1) : 0) +
-                    ' currentTime=' +
-                    video.currentTime.toFixed(1) +
-                    ' paused=' +
-                    video.paused,
-            );
-        }
+        console.log(
+            '[AD DEBUG] Video state: readyState=' +
+                video.readyState +
+                ' networkState=' +
+                video.networkState +
+                ' buffered=' +
+                (video.buffered.length > 0 ? video.buffered.end(video.buffered.length - 1).toFixed(1) : 0) +
+                ' currentTime=' +
+                video.currentTime.toFixed(1) +
+                ' paused=' +
+                video.paused,
+        );
         doTwitchPlayerTask(step.action === 'reload' ? 'reload' : 'pausePlay');
         playerBufferState.lastFixTime = Date.now();
     }
@@ -264,7 +262,7 @@ function checkStall(player: TwitchMediaPlayer, twitchState: TwitchPlayerState) {
 
 // Classify this tick for the stall ladder against the previous tick's snapshot.
 function observeStall(
-    videoEl: HTMLVideoElement | null | undefined,
+    video: HTMLVideoElement,
     position: number,
     bufferedPosition: number,
     bufferDuration: number,
@@ -274,9 +272,9 @@ function observeStall(
     //   readyState < 2 (HAVE_CURRENT_DATA) — MSE init / seek in flight / fresh post-
     //     reload load. currentTime and state.position are both genuinely 0 here, but
     //     it's an initialization state, not a stall — escalating would loop reloads.
-    //   videoEl.paused === true — player.isPaused() and the underlying <video>.paused can
+    //   video.paused === true — player.isPaused() and the underlying <video>.paused can
     //     disagree briefly during reload teardown / autoplay-policy mute toggles.
-    if (videoEl && (videoEl.readyState < 2 || videoEl.paused)) {
+    if (video.readyState < 2 || video.paused) {
         return 'hold';
     }
     // Position-frozen requires BOTH state.position AND video.currentTime unchanged: if

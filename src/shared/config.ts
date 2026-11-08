@@ -1,4 +1,4 @@
-import type { SharedConfig } from './types.ts';
+import type { PageToWorkerValues, SharedConfig } from './types.ts';
 
 /**
  * Defaults for the settings both sides use. The page overrides some from localStorage at
@@ -22,6 +22,22 @@ export function defaultSharedConfig(): SharedConfig {
         ClientSession: null,
     };
 }
+
+/**
+ * GQL request headers the page captures and relays to the worker: the first of `headers` that
+ * is a string sets `field` on both sides, sent to the worker as a `key` message.
+ */
+export const GQL_HEADER_RELAYS = [
+    { headers: ['X-Device-Id', 'Device-ID'], field: 'GQLDeviceID', key: 'UpdateDeviceId' },
+    { headers: ['Client-Version'], field: 'ClientVersion', key: 'UpdateClientVersion' },
+    { headers: ['Client-Session-Id'], field: 'ClientSession', key: 'UpdateClientSession' },
+    { headers: ['Client-Integrity'], field: 'ClientIntegrityHeader', key: 'UpdateClientIntegrityHeader' },
+    { headers: ['Authorization'], field: 'AuthorizationHeader', key: 'UpdateAuthorizationHeader' },
+] as const satisfies readonly {
+    headers: readonly string[];
+    field: keyof SharedConfig;
+    key: keyof PageToWorkerValues;
+}[];
 
 /** The SharedConfig fields of a page/worker state object, as a plain copy. */
 export function pickSharedConfig(source: SharedConfig): SharedConfig {

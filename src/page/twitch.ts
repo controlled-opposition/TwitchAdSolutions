@@ -46,10 +46,63 @@ export interface TwitchPlayerState {
     props?: { content?: { type?: string } };
 }
 
+/**
+ * One pre-order walk of the fiber tree returning, for each constraint, the first component
+ * instance that satisfies it (Twitch internals, untyped). Stops once every constraint has
+ * matched, so finding several instances costs one walk instead of one each.
+ */
+function findReactNodes(root: ReactFiber, constraints: ((stateNode: ReactInstance) => unknown)[]): ReactInstance[] {
+    const found: ReactInstance[] = constraints.map(() => null);
+    let remaining = constraints.length;
+    function visit(fiber: ReactFiber): boolean {
+        const stateNode = fiber.stateNode;
+        if (stateNode) {
+            for (let i = 0; i < constraints.length; i++) {
+                if (!found[i] && constraints[i](stateNode)) {
+                    found[i] = stateNode;
+                    if (--remaining === 0) return true;
+                }
+            }
+        }
+        for (let node = fiber.child; node; node = node.sibling) {
+            if (visit(node)) return true;
+        }
+        return false;
+    }
+    visit(root);
+    return found;
+}
+function findReactNode(root: ReactFiber, constraint: (stateNode: ReactInstance) => unknown): ReactInstance {
+    return findReactNodes(root, [constraint])[0];
+}
 /** Cached #root element (never changes in React SPAs). */
 let cachedRootNode: ReactRootElement | null = null;
 /** Own-property key of #root that holds the React 18 root fiber, once found. */
 let cachedContainerKey: string | null = null;
+function findReactRootNode(): ReactFiber | null {
+    let reactRootNode: ReactFiber | null = null;
+    if (!cachedRootNode) {
+        cachedRootNode = document.querySelector('#root') as ReactRootElement | null;
+    }
+    const rootNode = cachedRootNode;
+    if (
+        rootNode &&
+        rootNode._reactRootContainer &&
+        rootNode._reactRootContainer._internalRoot &&
+        rootNode._reactRootContainer._internalRoot.current
+    ) {
+        reactRootNode = rootNode._reactRootContainer._internalRoot.current;
+    }
+    if (reactRootNode == null && rootNode != null) {
+        // React 18 keeps the root fiber under a per-page randomised key; find it once.
+        cachedContainerKey ??=
+            Object.keys(rootNode).find((x) => x.startsWith('__reactContainer') || x.startsWith('__reactFiber')) ?? null;
+        if (cachedContainerKey != null) {
+            reactRootNode = rootNode[cachedContainerKey];
+        }
+    }
+    return reactRootNode;
+}
 // "Not found" log state (see the grace period at the end of getPlayerAndState).
 let firstPlayerNullAt = 0;
 let loggedNoPlayer = false;
@@ -57,60 +110,6 @@ let firstStateNullAt = 0;
 let loggedNoState = false;
 // Traverse React's fiber tree to find Twitch's player and player state instances
 export function getPlayerAndState() {
-    /**
-     * One pre-order walk of the fiber tree returning, for each constraint, the first component
-     * instance that satisfies it (Twitch internals, untyped). Stops once every constraint has
-     * matched, so finding several instances costs one walk instead of one each.
-     */
-    function findReactNodes(root: ReactFiber, constraints: ((stateNode: ReactInstance) => unknown)[]): ReactInstance[] {
-        const found: ReactInstance[] = constraints.map(() => null);
-        let remaining = constraints.length;
-        function visit(fiber: ReactFiber): boolean {
-            const stateNode = fiber.stateNode;
-            if (stateNode) {
-                for (let i = 0; i < constraints.length; i++) {
-                    if (!found[i] && constraints[i](stateNode)) {
-                        found[i] = stateNode;
-                        if (--remaining === 0) return true;
-                    }
-                }
-            }
-            for (let node = fiber.child; node; node = node.sibling) {
-                if (visit(node)) return true;
-            }
-            return false;
-        }
-        visit(root);
-        return found;
-    }
-    function findReactNode(root: ReactFiber, constraint: (stateNode: ReactInstance) => unknown): ReactInstance {
-        return findReactNodes(root, [constraint])[0];
-    }
-    function findReactRootNode(): ReactFiber | null {
-        let reactRootNode: ReactFiber | null = null;
-        if (!cachedRootNode) {
-            cachedRootNode = document.querySelector('#root') as ReactRootElement | null;
-        }
-        const rootNode = cachedRootNode;
-        if (
-            rootNode &&
-            rootNode._reactRootContainer &&
-            rootNode._reactRootContainer._internalRoot &&
-            rootNode._reactRootContainer._internalRoot.current
-        ) {
-            reactRootNode = rootNode._reactRootContainer._internalRoot.current;
-        }
-        if (reactRootNode == null && rootNode != null) {
-            // React 18 keeps the root fiber under a per-page randomised key; find it once.
-            cachedContainerKey ??=
-                Object.keys(rootNode).find((x) => x.startsWith('__reactContainer') || x.startsWith('__reactFiber')) ??
-                null;
-            if (cachedContainerKey != null) {
-                reactRootNode = rootNode[cachedContainerKey];
-            }
-        }
-        return reactRootNode;
-    }
     const reactRootNode = findReactRootNode();
     if (!reactRootNode) {
         return null;

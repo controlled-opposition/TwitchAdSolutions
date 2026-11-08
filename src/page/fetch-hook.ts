@@ -1,3 +1,4 @@
+import { GQL_HEADER_RELAYS } from '../shared/config.ts';
 import { installHook } from '../shared/hook.ts';
 import { maskAsNative } from './mask.ts';
 import { playerBufferState, state } from './state.ts';
@@ -38,6 +39,16 @@ function countCsaiRequest(url: string, transport: 'fetch' | 'xhr') {
             (n === 1 ? ' (client-side insertion, not blockable via m3u8)' : ''),
     );
 }
+/** The value of the first of `names` that is a string header. */
+function firstStringHeader(headers: Record<string, unknown>, names: readonly string[]): string | undefined {
+    for (const name of names) {
+        const value = headers[name];
+        if (typeof value === 'string') {
+            return value;
+        }
+    }
+    return undefined;
+}
 // Hook fetch() in the window scope to capture auth headers and modify player type requests
 export function hookFetch() {
     let hasLoggedHeaders = false;
@@ -49,39 +60,12 @@ export function hookFetch() {
                 // init can be absent (a bare fetch(url) used to throw here and fail the request)
                 // or carry a Headers instance; only a plain-object header map is read.
                 const headers = (init?.headers || {}) as Record<string, unknown>;
-                let deviceId = headers['X-Device-Id'];
-                if (typeof deviceId !== 'string') {
-                    deviceId = headers['Device-ID'];
-                }
-                if (typeof deviceId === 'string' && state.GQLDeviceID !== deviceId) {
-                    state.GQLDeviceID = deviceId;
-                    postTwitchWorkerMessage('UpdateDeviceId', state.GQLDeviceID);
-                }
-                const headerClientVersion = headers['Client-Version'];
-                if (typeof headerClientVersion === 'string' && headerClientVersion !== state.ClientVersion) {
-                    state.ClientVersion = headerClientVersion;
-                    postTwitchWorkerMessage('UpdateClientVersion', state.ClientVersion);
-                }
-                const headerClientSession = headers['Client-Session-Id'];
-                if (typeof headerClientSession === 'string' && headerClientSession !== state.ClientSession) {
-                    state.ClientSession = headerClientSession;
-                    postTwitchWorkerMessage('UpdateClientSession', state.ClientSession);
-                }
-                const headerClientIntegrityHeader = headers['Client-Integrity'];
-                if (
-                    typeof headerClientIntegrityHeader === 'string' &&
-                    headerClientIntegrityHeader !== state.ClientIntegrityHeader
-                ) {
-                    state.ClientIntegrityHeader = headerClientIntegrityHeader;
-                    postTwitchWorkerMessage('UpdateClientIntegrityHeader', state.ClientIntegrityHeader);
-                }
-                const headerAuthorizationHeader = headers['Authorization'];
-                if (
-                    typeof headerAuthorizationHeader === 'string' &&
-                    headerAuthorizationHeader !== state.AuthorizationHeader
-                ) {
-                    state.AuthorizationHeader = headerAuthorizationHeader;
-                    postTwitchWorkerMessage('UpdateAuthorizationHeader', state.AuthorizationHeader);
+                for (const relay of GQL_HEADER_RELAYS) {
+                    const value = firstStringHeader(headers, relay.headers);
+                    if (value !== undefined && state[relay.field] !== value) {
+                        state[relay.field] = value;
+                        postTwitchWorkerMessage(relay.key, value);
+                    }
                 }
                 if (!hasLoggedHeaders && state.GQLDeviceID && state.AuthorizationHeader) {
                     hasLoggedHeaders = true;

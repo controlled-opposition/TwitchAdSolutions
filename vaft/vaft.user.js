@@ -46,54 +46,54 @@
   }
 
   // src/page/twitch.ts
+  function findReactNodes(root, constraints) {
+    const found = constraints.map(() => null);
+    let remaining = constraints.length;
+    function visit(fiber) {
+      const stateNode = fiber.stateNode;
+      if (stateNode) {
+        for (let i = 0; i < constraints.length; i++) {
+          if (!found[i] && constraints[i](stateNode)) {
+            found[i] = stateNode;
+            if (--remaining === 0) return true;
+          }
+        }
+      }
+      for (let node = fiber.child; node; node = node.sibling) {
+        if (visit(node)) return true;
+      }
+      return false;
+    }
+    visit(root);
+    return found;
+  }
+  function findReactNode(root, constraint) {
+    return findReactNodes(root, [constraint])[0];
+  }
   var cachedRootNode = null;
   var cachedContainerKey = null;
+  function findReactRootNode() {
+    let reactRootNode = null;
+    if (!cachedRootNode) {
+      cachedRootNode = document.querySelector("#root");
+    }
+    const rootNode = cachedRootNode;
+    if (rootNode && rootNode._reactRootContainer && rootNode._reactRootContainer._internalRoot && rootNode._reactRootContainer._internalRoot.current) {
+      reactRootNode = rootNode._reactRootContainer._internalRoot.current;
+    }
+    if (reactRootNode == null && rootNode != null) {
+      cachedContainerKey ??= Object.keys(rootNode).find((x) => x.startsWith("__reactContainer") || x.startsWith("__reactFiber")) ?? null;
+      if (cachedContainerKey != null) {
+        reactRootNode = rootNode[cachedContainerKey];
+      }
+    }
+    return reactRootNode;
+  }
   var firstPlayerNullAt = 0;
   var loggedNoPlayer = false;
   var firstStateNullAt = 0;
   var loggedNoState = false;
   function getPlayerAndState() {
-    function findReactNodes(root, constraints) {
-      const found = constraints.map(() => null);
-      let remaining = constraints.length;
-      function visit(fiber) {
-        const stateNode = fiber.stateNode;
-        if (stateNode) {
-          for (let i = 0; i < constraints.length; i++) {
-            if (!found[i] && constraints[i](stateNode)) {
-              found[i] = stateNode;
-              if (--remaining === 0) return true;
-            }
-          }
-        }
-        for (let node = fiber.child; node; node = node.sibling) {
-          if (visit(node)) return true;
-        }
-        return false;
-      }
-      visit(root);
-      return found;
-    }
-    function findReactNode(root, constraint) {
-      return findReactNodes(root, [constraint])[0];
-    }
-    function findReactRootNode() {
-      let reactRootNode2 = null;
-      if (!cachedRootNode) {
-        cachedRootNode = document.querySelector("#root");
-      }
-      const rootNode = cachedRootNode;
-      if (rootNode && rootNode._reactRootContainer && rootNode._reactRootContainer._internalRoot && rootNode._reactRootContainer._internalRoot.current) {
-        reactRootNode2 = rootNode._reactRootContainer._internalRoot.current;
-      }
-      if (reactRootNode2 == null && rootNode != null) {
-        cachedContainerKey ??= Object.keys(rootNode).find((x) => x.startsWith("__reactContainer") || x.startsWith("__reactFiber")) ?? null;
-        if (cachedContainerKey != null) {
-          reactRootNode2 = rootNode[cachedContainerKey];
-        }
-      }
-      return reactRootNode2;
-    }
     const reactRootNode = findReactRootNode();
     if (!reactRootNode) {
       return null;
@@ -179,6 +179,13 @@
       ClientSession: null
     };
   }
+  var GQL_HEADER_RELAYS = [
+    { headers: ["X-Device-Id", "Device-ID"], field: "GQLDeviceID", key: "UpdateDeviceId" },
+    { headers: ["Client-Version"], field: "ClientVersion", key: "UpdateClientVersion" },
+    { headers: ["Client-Session-Id"], field: "ClientSession", key: "UpdateClientSession" },
+    { headers: ["Client-Integrity"], field: "ClientIntegrityHeader", key: "UpdateClientIntegrityHeader" },
+    { headers: ["Authorization"], field: "AuthorizationHeader", key: "UpdateAuthorizationHeader" }
+  ];
   function pickSharedConfig(source) {
     const config = defaultSharedConfig();
     for (const key of Object.keys(config)) {
@@ -327,6 +334,158 @@
     });
   }
 
+  // src/page/mask.ts
+  function maskAsNative(fn, name) {
+    try {
+      Object.defineProperty(fn, "toString", {
+        value: () => "function " + name + "() { [native code] }",
+        writable: true,
+        configurable: true
+      });
+    } catch {
+    }
+    return fn;
+  }
+
+  // src/page/storage.ts
+  var PRESERVED_PLAYER_SETTINGS = [
+    { key: "video-quality", restoreEmpty: false },
+    { key: "video-muted", restoreEmpty: false },
+    { key: "volume", restoreEmpty: false },
+    { key: "lowLatencyModeEnabled", restoreEmpty: true },
+    // Low Latency
+    { key: "persistenceEnabled", restoreEmpty: true }
+    // Mini Player
+  ];
+  function onContentLoaded() {
+    if (document.getElementById("seventv-extension")) {
+      console.log(
+        "[AD DEBUG] Warning: 7TV extension detected — may cause black screen or buffering issues. If you experience problems, try disabling 7TV."
+      );
+    }
+    let wasVideoPlaying = true;
+    const visibilityChange = () => {
+      const video = getPlayerVideoElement();
+      if (!video) return;
+      if (document.hidden) {
+        wasVideoPlaying = !video.paused && !video.ended;
+        return;
+      }
+      if (!playerBufferState.hasStreamStarted) {
+        playerBufferState.hasStreamStarted = true;
+      }
+      if (wasVideoPlaying && !video.ended && video.paused) {
+        video.play()?.catch?.(() => {
+        });
+      }
+    };
+    document.addEventListener("visibilitychange", visibilityChange);
+    try {
+      const cachedValues = /* @__PURE__ */ new Map();
+      for (const { key } of PRESERVED_PLAYER_SETTINGS) {
+        cachedValues.set(key, localStorage.getItem(key));
+      }
+      const realSetItem = localStorage.setItem;
+      const setItemHook = maskAsNative(function(key, value) {
+        if (cachedValues.has(key)) {
+          cachedValues.set(key, value);
+        }
+        realSetItem.apply(this, arguments);
+      }, "setItem");
+      const realGetItem = localStorage.getItem;
+      const getItemHook = maskAsNative(function(key) {
+        if (cachedValues.has(key)) {
+          return cachedValues.get(key);
+        }
+        return realGetItem.apply(this, arguments);
+      }, "getItem");
+      const hooked = installHook(localStorage, "setItem", setItemHook, "localStorage.setItem") && installHook(localStorage, "getItem", getItemHook, "localStorage.getItem");
+      if (!hooked) {
+        runtime.localStorageHookFailed = true;
+      }
+    } catch (err) {
+      console.log("localStorageHooks failed " + err);
+      runtime.localStorageHookFailed = true;
+    }
+  }
+  var flagOverrides = [
+    {
+      key: "preferLowQualityBackup",
+      when: "false",
+      field: "PreferLowQualityBackup",
+      message: "PreferLowQualityBackup disabled via localStorage — sticky CSAI path only, no autoplay fallback or escape hatch"
+    },
+    {
+      key: "fastAutoplayFirstTry",
+      when: "false",
+      field: "FastAutoplayFirstTry",
+      message: "FastAutoplayFirstTry disabled via localStorage — full Source-tier probe on every break (no autoplay fast-path)"
+    },
+    {
+      key: "backupSwapFirst",
+      when: "false",
+      field: "BackupSwapFirst",
+      message: "BackupSwapFirst disabled via localStorage — using sticky CSAI path (strip on native stream)"
+    },
+    {
+      key: "disableAdSpoofing",
+      when: "false",
+      field: "DisableAdSpoofing",
+      message: "AdSpoofing enabled via localStorage opt-in — firing GQL ad-tracking beacons on ad detect"
+    },
+    {
+      key: "recoverFromSilentMute",
+      when: "false",
+      field: "RecoverFromSilentMute",
+      message: "RecoverFromSilentMute disabled via localStorage — hard-reload backstop respects already-muted state, mid-session manual mutes preserved across reloads"
+    },
+    {
+      key: "softReloadNoStrip",
+      when: "false",
+      field: "SoftReloadNoStrip",
+      message: "SoftReloadNoStrip disabled via localStorage — post-ad reload always hard, even on no-strip CSAI breaks (issue #129)"
+    },
+    {
+      key: "disablePostBreakWedge",
+      when: "true",
+      field: "DisablePostBreakWedge",
+      message: "Post-break video-wedge recovery DISABLED via localStorage — audio-alive/video-frozen after a break will not be auto-recovered"
+    }
+  ];
+  function readSetting(key) {
+    return localStorage.getItem("twitchAdSolutions_" + key);
+  }
+  function readBoolSetting(key) {
+    const value = readSetting(key);
+    return value === null ? null : value === "true";
+  }
+  function readNonNegativeSetting(key, parse) {
+    const value = parse(readSetting(key) ?? "");
+    return !Number.isNaN(value) && value >= 0 ? value : null;
+  }
+  function loadLocalStorageConfig() {
+    try {
+      state.ReloadPlayerAfterAd = readBoolSetting("reloadPlayerAfterAd") ?? state.ReloadPlayerAfterAd;
+      state.DisableReloadCap = readBoolSetting("disableReloadCap") ?? state.DisableReloadCap;
+      state.DriftCorrectionRate = readNonNegativeSetting("driftCorrectionRate", parseFloat) ?? state.DriftCorrectionRate;
+      state.EarlyReloadPollThreshold = readNonNegativeSetting("earlyReloadPollThreshold", (v) => parseInt(v, 10)) ?? state.EarlyReloadPollThreshold;
+      state.ForceAccessTokenPlayerType = readSetting("playerType") ?? state.ForceAccessTokenPlayerType;
+      state.PinBackupPlayerType = readBoolSetting("pinBackupPlayerType") ?? state.PinBackupPlayerType;
+      for (const { key, when, field, message } of flagOverrides) {
+        if (readSetting(key) === when) {
+          state[field] = when === "true";
+          console.log("[AD DEBUG] " + message);
+        }
+      }
+      if (readSetting("hideAdOverlay") === "true") {
+        const style = document.createElement("style");
+        style.textContent = ".tas-adblock-overlay { display: none !important; }";
+        (document.head || document.documentElement).appendChild(style);
+      }
+    } catch {
+    }
+  }
+
   // src/page/player.ts
   var isAppleTouchDevice = (function() {
     try {
@@ -345,6 +504,21 @@
     }
   })();
   var SCRIPT_PAUSE_RETRY_MS = 1e4;
+  function liveLatency(video) {
+    try {
+      if (video.seekable && video.seekable.length > 0) {
+        const seekableEnd = video.seekable.end(video.seekable.length - 1);
+        if (Number.isFinite(seekableEnd)) {
+          const latency = Math.max(0, seekableEnd - video.currentTime);
+          if (latency < 3600) {
+            return latency;
+          }
+        }
+      }
+    } catch {
+    }
+    return null;
+  }
   function doTwitchPlayerTask(task, reloadKind) {
     const playerAndState = getPlayerAndState();
     if (!playerAndState) {
@@ -398,22 +572,8 @@
     }
     const video = player.getHTMLVideoElement?.();
     if (reloadKind !== "codec-swap" && video && video.readyState >= 3 && !video.paused && !video.ended) {
-      let latencySec = 0;
-      let latencyKnown = false;
-      try {
-        if (video.seekable && video.seekable.length > 0) {
-          const seekableEnd = video.seekable.end(video.seekable.length - 1);
-          if (Number.isFinite(seekableEnd)) {
-            const calc = Math.max(0, seekableEnd - video.currentTime);
-            if (calc < 3600) {
-              latencySec = calc;
-              latencyKnown = true;
-            }
-          }
-        }
-      } catch {
-      }
-      if (!latencyKnown) {
+      const latencySec = liveLatency(video);
+      if (latencySec === null) {
         console.log("[AD DEBUG] Latency unknown (seekable unavailable) — proceeding with reload");
       } else if (latencySec > 7) {
         console.log(
@@ -426,28 +586,17 @@
         return "skipped-healthy";
       }
     }
-    const lsKeyQuality = "video-quality";
-    const lsKeyMuted = "video-muted";
-    const lsKeyVolume = "volume";
-    const lsKeyLowLatency = "lowLatencyModeEnabled";
-    const lsKeyPersistence = "persistenceEnabled";
-    let currentQualityLS = null;
-    let currentMutedLS = null;
-    let currentVolumeLS = null;
-    let currentLowLatencyLS = null;
-    let currentPersistenceLS = null;
+    const savedSettings = /* @__PURE__ */ new Map();
     try {
-      currentQualityLS = localStorage.getItem(lsKeyQuality);
-      currentMutedLS = localStorage.getItem(lsKeyMuted);
-      currentVolumeLS = localStorage.getItem(lsKeyVolume);
-      currentLowLatencyLS = localStorage.getItem(lsKeyLowLatency);
-      currentPersistenceLS = localStorage.getItem(lsKeyPersistence);
+      for (const { key } of PRESERVED_PLAYER_SETTINGS) {
+        savedSettings.set(key, localStorage.getItem(key));
+      }
       if (runtime.localStorageHookFailed && player?.core?.state) {
-        localStorage.setItem(lsKeyMuted, JSON.stringify({ default: player.core.state.muted }));
-        localStorage.setItem(lsKeyVolume, String(player.core.state.volume));
+        localStorage.setItem("video-muted", JSON.stringify({ default: player.core.state.muted }));
+        localStorage.setItem("volume", String(player.core.state.volume));
       }
       if (player?.core?.state?.quality?.group) {
-        localStorage.setItem(lsKeyQuality, JSON.stringify({ default: player.core.state.quality.group }));
+        localStorage.setItem("video-quality", JSON.stringify({ default: player.core.state.quality.group }));
       }
     } catch {
     }
@@ -478,23 +627,15 @@
     });
     setTimeout(() => {
       try {
-        if (currentQualityLS) {
-          localStorage.setItem(lsKeyQuality, currentQualityLS);
-        }
-        if (currentMutedLS) {
-          localStorage.setItem(lsKeyMuted, currentMutedLS);
-        }
-        if (currentVolumeLS) {
-          localStorage.setItem(lsKeyVolume, currentVolumeLS);
-        }
-        if (currentLowLatencyLS !== null) {
-          localStorage.setItem(lsKeyLowLatency, currentLowLatencyLS);
-        }
-        if (currentPersistenceLS !== null) {
-          localStorage.setItem(lsKeyPersistence, currentPersistenceLS);
+        for (const { key, restoreEmpty } of PRESERVED_PLAYER_SETTINGS) {
+          const value = savedSettings.get(key);
+          if (value != null && (value !== "" || restoreEmpty)) {
+            localStorage.setItem(key, value);
+          }
         }
         const video2 = getPlayerVideoElement();
-        const userIntendedMute = currentMutedLS && currentMutedLS.includes('"default":true');
+        const savedMuted = savedSettings.get("video-muted");
+        const userIntendedMute = savedMuted && savedMuted.includes('"default":true');
         if (video2 && video2.muted && !userIntendedMute) {
           video2.muted = false;
         }
@@ -741,8 +882,19 @@
   function within(at, ms) {
     return !!at && Date.now() - at < ms;
   }
-  var visibilityHooked = false;
   var pendingTick = false;
+  function startBufferMonitor() {
+    monitorPlayerBuffering();
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden && !pendingTick) {
+        pendingTick = true;
+        setTimeout(() => {
+          pendingTick = false;
+          monitorPlayerBuffering();
+        }, 100);
+      }
+    });
+  }
   function monitorPlayerBuffering() {
     runtime.playerForMonitoringBuffering = null;
     {
@@ -790,18 +942,6 @@
       });
     }
     playerBufferState.isLive = isLive;
-    if (typeof document !== "undefined" && !visibilityHooked) {
-      visibilityHooked = true;
-      document.addEventListener("visibilitychange", () => {
-        if (!document.hidden && !pendingTick) {
-          pendingTick = true;
-          setTimeout(() => {
-            pendingTick = false;
-            monitorPlayerBuffering();
-          }, 100);
-        }
-      });
-    }
     try {
       hideTwitchAdOverlays();
     } catch {
@@ -820,7 +960,11 @@
     playerBufferState.adStall = { phase: "idle" };
   }
   function checkStall(player, twitchState) {
-    if (twitchState.props?.content?.type !== "live" || player.isPaused() || player.getHTMLVideoElement()?.ended || (player.getHTMLVideoElement()?.readyState ?? 0) < 1 || playerBufferState.lastFixTime > Date.now() - state.PlayerBufferingMinRepeatDelay || runtime.isActivelyStrippingAds || playerBufferState.inAdBreak || within(playerBufferState.lastReloadAt, RELOAD_GRACE_MS) || within(playerBufferState.lastBackupSwitchAt, BACKUP_SWITCH_GRACE_MS)) {
+    if (twitchState.props?.content?.type !== "live" || player.isPaused()) {
+      return;
+    }
+    const video = player.getHTMLVideoElement();
+    if (!video || video.ended || (video.readyState ?? 0) < 1 || playerBufferState.lastFixTime > Date.now() - state.PlayerBufferingMinRepeatDelay || runtime.isActivelyStrippingAds || playerBufferState.inAdBreak || within(playerBufferState.lastReloadAt, RELOAD_GRACE_MS) || within(playerBufferState.lastBackupSwitchAt, BACKUP_SWITCH_GRACE_MS)) {
       return;
     }
     const m3u8Url = player.core?.state?.path;
@@ -841,19 +985,18 @@
     const position = player.core?.state?.position;
     const bufferedPosition = player.core?.state?.bufferedPosition;
     const bufferDuration = player.getBufferDuration();
-    const videoEl = player.getHTMLVideoElement?.();
-    const videoCurrentTime = videoEl?.currentTime;
+    const videoCurrentTime = video.currentTime;
     if (position === void 0 || bufferedPosition === void 0) {
       playerBufferState.stall.frozenTicks = 0;
       return;
     }
-    if (videoEl && playerBufferState.videoElement && playerBufferState.videoElement !== videoEl) {
+    if (playerBufferState.videoElement && playerBufferState.videoElement !== video) {
       resetStallLadder(playerBufferState.stall);
     }
-    playerBufferState.videoElement = videoEl;
+    playerBufferState.videoElement = video;
     const step = stallTick(
       playerBufferState.stall,
-      observeStall(videoEl, position, bufferedPosition, bufferDuration, videoCurrentTime),
+      observeStall(video, position, bufferedPosition, bufferDuration, videoCurrentTime),
       state.PlayerBufferingSameStateCount,
       !state.DisableReloadCap
     );
@@ -862,8 +1005,7 @@
       console.log(
         "Attempt to fix buffering position:" + playerBufferState.position + " bufferedPosition:" + playerBufferState.bufferedPosition + " bufferDuration:" + playerBufferState.bufferDuration + note
       );
-      const video = player.getHTMLVideoElement?.();
-      if (video && video.buffered.length > 1) {
+      if (video.buffered.length > 1) {
         for (let bi = 0; bi < video.buffered.length; bi++) {
           if (video.buffered.start(bi) > video.currentTime + 0.5) {
             console.log(
@@ -875,11 +1017,9 @@
           }
         }
       }
-      if (video) {
-        console.log(
-          "[AD DEBUG] Video state: readyState=" + video.readyState + " networkState=" + video.networkState + " buffered=" + (video.buffered.length > 0 ? video.buffered.end(video.buffered.length - 1).toFixed(1) : 0) + " currentTime=" + video.currentTime.toFixed(1) + " paused=" + video.paused
-        );
-      }
+      console.log(
+        "[AD DEBUG] Video state: readyState=" + video.readyState + " networkState=" + video.networkState + " buffered=" + (video.buffered.length > 0 ? video.buffered.end(video.buffered.length - 1).toFixed(1) : 0) + " currentTime=" + video.currentTime.toFixed(1) + " paused=" + video.paused
+      );
       doTwitchPlayerTask(step.action === "reload" ? "reload" : "pausePlay");
       playerBufferState.lastFixTime = Date.now();
     }
@@ -896,8 +1036,8 @@
     playerBufferState.bufferedPosition = bufferedPosition;
     playerBufferState.bufferDuration = bufferDuration;
   }
-  function observeStall(videoEl, position, bufferedPosition, bufferDuration, videoCurrentTime) {
-    if (videoEl && (videoEl.readyState < 2 || videoEl.paused)) {
+  function observeStall(video, position, bufferedPosition, bufferDuration, videoCurrentTime) {
+    if (video.readyState < 2 || video.paused) {
       return "hold";
     }
     const positionFrozen = playerBufferState.position === position && (playerBufferState.videoCurrentTime === void 0 || playerBufferState.videoCurrentTime === videoCurrentTime);
@@ -990,19 +1130,6 @@
     }
   }
 
-  // src/page/mask.ts
-  function maskAsNative(fn, name) {
-    try {
-      Object.defineProperty(fn, "toString", {
-        value: () => "function " + name + "() { [native code] }",
-        writable: true,
-        configurable: true
-      });
-    } catch {
-    }
-    return fn;
-  }
-
   // src/page/fetch-hook.ts
   var csaiRequestCounts = /* @__PURE__ */ Object.create(null);
   function countCsaiRequest(url, transport) {
@@ -1022,6 +1149,15 @@
       "[AD DEBUG] CSAI ad request (" + transport + ") — type: " + csaiType + chan + (inBreak ? " during a detected break" : " with NO break detected — vaft never saw this ad") + " | this type so far: " + c.noBreak + " unseen, " + c.inBreak + " during breaks" + (n === 1 ? " (client-side insertion, not blockable via m3u8)" : "")
     );
   }
+  function firstStringHeader(headers, names) {
+    for (const name of names) {
+      const value = headers[name];
+      if (typeof value === "string") {
+        return value;
+      }
+    }
+    return void 0;
+  }
   function hookFetch() {
     let hasLoggedHeaders = false;
     const realFetch = window.fetch;
@@ -1030,33 +1166,12 @@
       if (typeof url === "string") {
         if (url.includes("gql")) {
           const headers = init?.headers || {};
-          let deviceId = headers["X-Device-Id"];
-          if (typeof deviceId !== "string") {
-            deviceId = headers["Device-ID"];
-          }
-          if (typeof deviceId === "string" && state.GQLDeviceID !== deviceId) {
-            state.GQLDeviceID = deviceId;
-            postTwitchWorkerMessage("UpdateDeviceId", state.GQLDeviceID);
-          }
-          const headerClientVersion = headers["Client-Version"];
-          if (typeof headerClientVersion === "string" && headerClientVersion !== state.ClientVersion) {
-            state.ClientVersion = headerClientVersion;
-            postTwitchWorkerMessage("UpdateClientVersion", state.ClientVersion);
-          }
-          const headerClientSession = headers["Client-Session-Id"];
-          if (typeof headerClientSession === "string" && headerClientSession !== state.ClientSession) {
-            state.ClientSession = headerClientSession;
-            postTwitchWorkerMessage("UpdateClientSession", state.ClientSession);
-          }
-          const headerClientIntegrityHeader = headers["Client-Integrity"];
-          if (typeof headerClientIntegrityHeader === "string" && headerClientIntegrityHeader !== state.ClientIntegrityHeader) {
-            state.ClientIntegrityHeader = headerClientIntegrityHeader;
-            postTwitchWorkerMessage("UpdateClientIntegrityHeader", state.ClientIntegrityHeader);
-          }
-          const headerAuthorizationHeader = headers["Authorization"];
-          if (typeof headerAuthorizationHeader === "string" && headerAuthorizationHeader !== state.AuthorizationHeader) {
-            state.AuthorizationHeader = headerAuthorizationHeader;
-            postTwitchWorkerMessage("UpdateAuthorizationHeader", state.AuthorizationHeader);
+          for (const relay of GQL_HEADER_RELAYS) {
+            const value = firstStringHeader(headers, relay.headers);
+            if (value !== void 0 && state[relay.field] !== value) {
+              state[relay.field] = value;
+              postTwitchWorkerMessage(relay.key, value);
+            }
           }
           if (!hasLoggedHeaders && state.GQLDeviceID && state.AuthorizationHeader) {
             hasLoggedHeaders = true;
@@ -1112,145 +1227,6 @@
     installHook(XMLHttpRequest.prototype, "open", hook, "XMLHttpRequest.open");
   }
 
-  // src/page/storage.ts
-  function onContentLoaded() {
-    if (document.getElementById("seventv-extension")) {
-      console.log(
-        "[AD DEBUG] Warning: 7TV extension detected — may cause black screen or buffering issues. If you experience problems, try disabling 7TV."
-      );
-    }
-    let wasVideoPlaying = true;
-    const visibilityChange = () => {
-      const video = getPlayerVideoElement();
-      if (!video) return;
-      if (document.hidden) {
-        wasVideoPlaying = !video.paused && !video.ended;
-        return;
-      }
-      if (!playerBufferState.hasStreamStarted) {
-        playerBufferState.hasStreamStarted = true;
-      }
-      if (wasVideoPlaying && !video.ended && video.paused) {
-        video.play()?.catch?.(() => {
-        });
-      }
-    };
-    document.addEventListener("visibilitychange", visibilityChange);
-    try {
-      const keysToCache = [
-        "video-quality",
-        "video-muted",
-        "volume",
-        "lowLatencyModeEnabled",
-        // Low Latency
-        "persistenceEnabled"
-        // Mini Player
-      ];
-      const cachedValues = /* @__PURE__ */ new Map();
-      for (let i = 0; i < keysToCache.length; i++) {
-        cachedValues.set(keysToCache[i], localStorage.getItem(keysToCache[i]));
-      }
-      const realSetItem = localStorage.setItem;
-      const setItemHook = maskAsNative(function(key, value) {
-        if (cachedValues.has(key)) {
-          cachedValues.set(key, value);
-        }
-        realSetItem.apply(this, arguments);
-      }, "setItem");
-      const realGetItem = localStorage.getItem;
-      const getItemHook = maskAsNative(function(key) {
-        if (cachedValues.has(key)) {
-          return cachedValues.get(key);
-        }
-        return realGetItem.apply(this, arguments);
-      }, "getItem");
-      const hooked = installHook(localStorage, "setItem", setItemHook, "localStorage.setItem") && installHook(localStorage, "getItem", getItemHook, "localStorage.getItem");
-      if (!hooked) {
-        runtime.localStorageHookFailed = true;
-      }
-    } catch (err) {
-      console.log("localStorageHooks failed " + err);
-      runtime.localStorageHookFailed = true;
-    }
-  }
-  var flagOverrides = [
-    {
-      key: "preferLowQualityBackup",
-      when: "false",
-      field: "PreferLowQualityBackup",
-      message: "PreferLowQualityBackup disabled via localStorage — sticky CSAI path only, no autoplay fallback or escape hatch"
-    },
-    {
-      key: "fastAutoplayFirstTry",
-      when: "false",
-      field: "FastAutoplayFirstTry",
-      message: "FastAutoplayFirstTry disabled via localStorage — full Source-tier probe on every break (no autoplay fast-path)"
-    },
-    {
-      key: "backupSwapFirst",
-      when: "false",
-      field: "BackupSwapFirst",
-      message: "BackupSwapFirst disabled via localStorage — using sticky CSAI path (strip on native stream)"
-    },
-    {
-      key: "disableAdSpoofing",
-      when: "false",
-      field: "DisableAdSpoofing",
-      message: "AdSpoofing enabled via localStorage opt-in — firing GQL ad-tracking beacons on ad detect"
-    },
-    {
-      key: "recoverFromSilentMute",
-      when: "false",
-      field: "RecoverFromSilentMute",
-      message: "RecoverFromSilentMute disabled via localStorage — hard-reload backstop respects already-muted state, mid-session manual mutes preserved across reloads"
-    },
-    {
-      key: "softReloadNoStrip",
-      when: "false",
-      field: "SoftReloadNoStrip",
-      message: "SoftReloadNoStrip disabled via localStorage — post-ad reload always hard, even on no-strip CSAI breaks (issue #129)"
-    },
-    {
-      key: "disablePostBreakWedge",
-      when: "true",
-      field: "DisablePostBreakWedge",
-      message: "Post-break video-wedge recovery DISABLED via localStorage — audio-alive/video-frozen after a break will not be auto-recovered"
-    }
-  ];
-  function readSetting(key) {
-    return localStorage.getItem("twitchAdSolutions_" + key);
-  }
-  function readBoolSetting(key) {
-    const value = readSetting(key);
-    return value === null ? null : value === "true";
-  }
-  function readNonNegativeSetting(key, parse) {
-    const value = parse(readSetting(key) ?? "");
-    return !Number.isNaN(value) && value >= 0 ? value : null;
-  }
-  function loadLocalStorageConfig() {
-    try {
-      state.ReloadPlayerAfterAd = readBoolSetting("reloadPlayerAfterAd") ?? state.ReloadPlayerAfterAd;
-      state.DisableReloadCap = readBoolSetting("disableReloadCap") ?? state.DisableReloadCap;
-      state.DriftCorrectionRate = readNonNegativeSetting("driftCorrectionRate", parseFloat) ?? state.DriftCorrectionRate;
-      state.EarlyReloadPollThreshold = readNonNegativeSetting("earlyReloadPollThreshold", (v) => parseInt(v, 10)) ?? state.EarlyReloadPollThreshold;
-      state.ForceAccessTokenPlayerType = readSetting("playerType") ?? state.ForceAccessTokenPlayerType;
-      state.PinBackupPlayerType = readBoolSetting("pinBackupPlayerType") ?? state.PinBackupPlayerType;
-      for (const { key, when, field, message } of flagOverrides) {
-        if (readSetting(key) === when) {
-          state[field] = when === "true";
-          console.log("[AD DEBUG] " + message);
-        }
-      }
-      if (readSetting("hideAdOverlay") === "true") {
-        const style = document.createElement("style");
-        style.textContent = ".tas-adblock-overlay { display: none !important; }";
-        (document.head || document.documentElement).appendChild(style);
-      }
-    } catch {
-    }
-  }
-
   // src/shared/wasm-worker.ts
   var cache = /* @__PURE__ */ Object.create(null);
   function getWasmWorkerJs(twitchBlobUrl) {
@@ -1270,6 +1246,41 @@
   function runWorker(__vaftInit) {
 (() => {
   "use strict";
+  // src/shared/config.ts
+  function defaultSharedConfig() {
+    return {
+      ReloadPlayerAfterAd: true,
+      // After the ad finishes do a player reload instead of pause/play
+      EarlyReloadPollThreshold: 3,
+      // Number of consecutive all-stripped polls before triggering early reload (each poll ~2s, so 3 = ~6s, 5 = ~10s, 10 = ~20s; 0 = disable). Lowered from 5 to 3 to match the testing variant — field reports indicate faster early-reload recovers heavier SSAI breaks more cleanly. Override via localStorage twitchAdSolutions_earlyReloadPollThreshold.
+      PinBackupPlayerType: true,
+      // Remember which backup player type worked and try it first on next ad break
+      PreferLowQualityBackup: true,
+      // Hybrid safety net for SSAI-heavy breaks: sticky escape hatch (fires after ~8s stuck in all-stripped state) + autoplay (360p) as last-resort backup when all Source types are ad-laden. Default on; set twitchAdSolutions_preferLowQualityBackup=false to disable.
+      FastAutoplayFirstTry: true,
+      // When the prior break committed autoplay-via-escape-hatch, prepend autoplay (360p) to position 0 of playerTypesToTry on the next break — autoplay wins on first probe (~340ms) instead of cycling through 4 Source types (~1.5-2s). Auto-resets when a Source-tier type wins (channel recovered), so quality returns to full automatically if Twitch ever brings back non-ad-laden Source backups. Default on as of v67.1.0 — field data (project_all_channels_csai_only_marked) confirms every observed channel exhausts Source-tier on every break. Opt-out via localStorage twitchAdSolutions_fastAutoplayFirstTry=false.
+      BackupSwapFirst: true,
+      // On ad detect, immediately swap to a backup player-type m3u8 (TTV-AB-style). Avoids MediaSource mixing from strip activity — fewer loading circles in field. Cost: extra fetches on every ad break. Default on; set twitchAdSolutions_backupSwapFirst=false to disable.
+      DisableAdSpoofing: true,
+      // Default OFF (was ON through v68.2.0). The always-100%-watched + audible + visible spoof beacon pattern may itself fingerprint as anomalous and trigger detection escalation (CSAI reaching the committed backup) — observed correlation in field + TTV-AB maintainer hypothesis. Spoof-accepted (no GQL rejection) does NOT prove not-fingerprinted; Twitch can 200-OK while using the beacon pattern as silent detection input. Opt in by setting twitchAdSolutions_disableAdSpoofing=false to re-enable the GQL ad-tracking beacons (video_ad_impression, video_ad_quartile_complete x 4, video_ad_pod_complete).
+      SoftReloadNoStrip: true,
+      // Issue #129 (mode D): the end-of-break reload after a no-strip break that committed a backup (BackupSwapFirst swap) is SOFT, except for an autoplay backup (needs the hard reload's token refresh to leave 360p). Hard reload's MediaSource flush is only needed after strip injection (BLANK_MP4/recovery) — on a no-strip break it just pays the desktop black-screen + play-icon teardown for nothing. Default on; set twitchAdSolutions_softReloadNoStrip=false to force the old always-hard behavior.
+      ForceAccessTokenPlayerType: "popout",
+      GQLDeviceID: null,
+      AuthorizationHeader: void 0,
+      ClientIntegrityHeader: null,
+      ClientVersion: null,
+      ClientSession: null
+    };
+  }
+  var GQL_HEADER_RELAYS = [
+    { headers: ["X-Device-Id", "Device-ID"], field: "GQLDeviceID", key: "UpdateDeviceId" },
+    { headers: ["Client-Version"], field: "ClientVersion", key: "UpdateClientVersion" },
+    { headers: ["Client-Session-Id"], field: "ClientSession", key: "UpdateClientSession" },
+    { headers: ["Client-Integrity"], field: "ClientIntegrityHeader", key: "UpdateClientIntegrityHeader" },
+    { headers: ["Authorization"], field: "AuthorizationHeader", key: "UpdateAuthorizationHeader" }
+  ];
+
   // src/shared/wasm-worker.ts
   var cache = /* @__PURE__ */ Object.create(null);
   function getWasmWorkerJs(twitchBlobUrl) {
@@ -1316,34 +1327,6 @@
       );
     }
     return hooked2;
-  }
-
-  // src/shared/config.ts
-  function defaultSharedConfig() {
-    return {
-      ReloadPlayerAfterAd: true,
-      // After the ad finishes do a player reload instead of pause/play
-      EarlyReloadPollThreshold: 3,
-      // Number of consecutive all-stripped polls before triggering early reload (each poll ~2s, so 3 = ~6s, 5 = ~10s, 10 = ~20s; 0 = disable). Lowered from 5 to 3 to match the testing variant — field reports indicate faster early-reload recovers heavier SSAI breaks more cleanly. Override via localStorage twitchAdSolutions_earlyReloadPollThreshold.
-      PinBackupPlayerType: true,
-      // Remember which backup player type worked and try it first on next ad break
-      PreferLowQualityBackup: true,
-      // Hybrid safety net for SSAI-heavy breaks: sticky escape hatch (fires after ~8s stuck in all-stripped state) + autoplay (360p) as last-resort backup when all Source types are ad-laden. Default on; set twitchAdSolutions_preferLowQualityBackup=false to disable.
-      FastAutoplayFirstTry: true,
-      // When the prior break committed autoplay-via-escape-hatch, prepend autoplay (360p) to position 0 of playerTypesToTry on the next break — autoplay wins on first probe (~340ms) instead of cycling through 4 Source types (~1.5-2s). Auto-resets when a Source-tier type wins (channel recovered), so quality returns to full automatically if Twitch ever brings back non-ad-laden Source backups. Default on as of v67.1.0 — field data (project_all_channels_csai_only_marked) confirms every observed channel exhausts Source-tier on every break. Opt-out via localStorage twitchAdSolutions_fastAutoplayFirstTry=false.
-      BackupSwapFirst: true,
-      // On ad detect, immediately swap to a backup player-type m3u8 (TTV-AB-style). Avoids MediaSource mixing from strip activity — fewer loading circles in field. Cost: extra fetches on every ad break. Default on; set twitchAdSolutions_backupSwapFirst=false to disable.
-      DisableAdSpoofing: true,
-      // Default OFF (was ON through v68.2.0). The always-100%-watched + audible + visible spoof beacon pattern may itself fingerprint as anomalous and trigger detection escalation (CSAI reaching the committed backup) — observed correlation in field + TTV-AB maintainer hypothesis. Spoof-accepted (no GQL rejection) does NOT prove not-fingerprinted; Twitch can 200-OK while using the beacon pattern as silent detection input. Opt in by setting twitchAdSolutions_disableAdSpoofing=false to re-enable the GQL ad-tracking beacons (video_ad_impression, video_ad_quartile_complete x 4, video_ad_pod_complete).
-      SoftReloadNoStrip: true,
-      // Issue #129 (mode D): the end-of-break reload after a no-strip break that committed a backup (BackupSwapFirst swap) is SOFT, except for an autoplay backup (needs the hard reload's token refresh to leave 360p). Hard reload's MediaSource flush is only needed after strip injection (BLANK_MP4/recovery) — on a no-strip break it just pays the desktop black-screen + play-icon teardown for nothing. Default on; set twitchAdSolutions_softReloadNoStrip=false to force the old always-hard behavior.
-      ForceAccessTokenPlayerType: "popout",
-      GQLDeviceID: null,
-      AuthorizationHeader: void 0,
-      ClientIntegrityHeader: null,
-      ClientVersion: null,
-      ClientSession: null
-    };
   }
 
   // src/worker/state.ts
@@ -2752,18 +2735,11 @@
   }
   Object.assign(state, __vaftInit.config);
   self.addEventListener("message", function(e) {
-    if (e.data.key === "UpdateClientVersion") {
-      state.ClientVersion = e.data.value;
-    } else if (e.data.key === "UpdateClientSession") {
-      state.ClientSession = e.data.value;
+    const headerRelay = GQL_HEADER_RELAYS.find((relay) => relay.key === e.data.key);
+    if (headerRelay) {
+      state[headerRelay.field] = e.data.value;
     } else if (e.data.key === "UpdateClientId") {
       state.ClientID = e.data.value;
-    } else if (e.data.key === "UpdateDeviceId") {
-      state.GQLDeviceID = e.data.value;
-    } else if (e.data.key === "UpdateClientIntegrityHeader") {
-      state.ClientIntegrityHeader = e.data.value;
-    } else if (e.data.key === "UpdateAuthorizationHeader") {
-      state.AuthorizationHeader = e.data.value;
     } else if (e.data.key === "FetchResponse") {
       const responseData = e.data.value;
       const pending = pendingFetchRequests.get(responseData.id);
@@ -3110,7 +3086,7 @@
     hookWindowWorker();
     hookFetch();
     hookXhr();
-    monitorPlayerBuffering();
+    startBufferMonitor();
     if (document.readyState === "complete" || document.readyState === "interactive") {
       onContentLoaded();
     } else {

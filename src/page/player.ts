@@ -3,6 +3,7 @@ import { getPlayerAndState, getPlayerVideoElement } from './twitch.ts';
 import { playerBufferState, runtime, state } from './state.ts';
 import { postTwitchWorkerMessage } from './workers.ts';
 import { startDriftCorrection } from './drift.ts';
+import { PRESERVED_PLAYER_SETTINGS } from './storage.ts';
 
 // Apple touch-device detection. iPadOS 13+ reports navigator.platform 'MacIntel' with a desktop
 // Safari UA — distinguished from a real Mac only by touch support (real Macs report maxTouchPoints 0).
@@ -38,6 +39,24 @@ export type PlayerTaskOutcome = 'done' | 'skipped-healthy' | 'not-done';
 
 /** Within this long of our own pause/play, a still-paused player is retried with play(). */
 const SCRIPT_PAUSE_RETRY_MS = 10000;
+
+/** Seconds the element is behind the end of its seekable range, or null when unknown. */
+function liveLatency(video: HTMLVideoElement): number | null {
+    try {
+        if (video.seekable && video.seekable.length > 0) {
+            const seekableEnd = video.seekable.end(video.seekable.length - 1);
+            if (Number.isFinite(seekableEnd)) {
+                const latency = Math.max(0, seekableEnd - video.currentTime);
+                // Sanity cap: values >1h indicate garbage from the Media Source API
+                // (seen right after a reload while the seekable range is in a transient state).
+                if (latency < 3600) {
+                    return latency;
+                }
+            }
+        }
+    } catch {}
+    return null;
+}
 
 // Pause/play or fully reload the Twitch player, preserving quality/volume settings
 export function doTwitchPlayerTask(task: 'pausePlay' | 'reload', reloadKind?: ReloadKind): PlayerTaskOutcome {
@@ -96,23 +115,8 @@ export function doTwitchPlayerTask(task: 'pausePlay' | 'reload', reloadKind?: Re
     // AVC master playlist, and only a reload makes the player fetch it.
     const video = player.getHTMLVideoElement?.();
     if (reloadKind !== 'codec-swap' && video && video.readyState >= 3 && !video.paused && !video.ended) {
-        let latencySec = 0;
-        let latencyKnown = false;
-        try {
-            if (video.seekable && video.seekable.length > 0) {
-                const seekableEnd = video.seekable.end(video.seekable.length - 1);
-                if (Number.isFinite(seekableEnd)) {
-                    const calc = Math.max(0, seekableEnd - video.currentTime);
-                    // Sanity cap: values >1h indicate garbage from the Media Source API
-                    // (seen right after a reload while the seekable range is in a transient state).
-                    if (calc < 3600) {
-                        latencySec = calc;
-                        latencyKnown = true;
-                    }
-                }
-            }
-        } catch {}
-        if (!latencyKnown) {
+        const latencySec = liveLatency(video);
+        if (latencySec === null) {
             console.log('[AD DEBUG] Latency unknown (seekable unavailable) — proceeding with reload');
         } else if (latencySec > 7) {
             console.log(
@@ -131,28 +135,17 @@ export function doTwitchPlayerTask(task: 'pausePlay' | 'reload', reloadKind?: Re
             return 'skipped-healthy';
         }
     }
-    const lsKeyQuality = 'video-quality';
-    const lsKeyMuted = 'video-muted';
-    const lsKeyVolume = 'volume';
-    const lsKeyLowLatency = 'lowLatencyModeEnabled'; // Preserve user's low-latency toggle across reloads (TTV-AB parity)
-    const lsKeyPersistence = 'persistenceEnabled'; // Preserve autoplay/persistence toggle across reloads (TTV-AB parity)
-    let currentQualityLS = null;
-    let currentMutedLS = null;
-    let currentVolumeLS = null;
-    let currentLowLatencyLS = null;
-    let currentPersistenceLS = null;
+    const savedSettings = new Map<string, string | null>();
     try {
-        currentQualityLS = localStorage.getItem(lsKeyQuality);
-        currentMutedLS = localStorage.getItem(lsKeyMuted);
-        currentVolumeLS = localStorage.getItem(lsKeyVolume);
-        currentLowLatencyLS = localStorage.getItem(lsKeyLowLatency);
-        currentPersistenceLS = localStorage.getItem(lsKeyPersistence);
+        for (const { key } of PRESERVED_PLAYER_SETTINGS) {
+            savedSettings.set(key, localStorage.getItem(key));
+        }
         if (runtime.localStorageHookFailed && player?.core?.state) {
-            localStorage.setItem(lsKeyMuted, JSON.stringify({ default: player.core.state.muted }));
-            localStorage.setItem(lsKeyVolume, String(player.core.state.volume)); // setItem stringifies anyway
+            localStorage.setItem('video-muted', JSON.stringify({ default: player.core.state.muted }));
+            localStorage.setItem('volume', String(player.core.state.volume)); // setItem stringifies anyway
         }
         if (player?.core?.state?.quality?.group) {
-            localStorage.setItem(lsKeyQuality, JSON.stringify({ default: player.core.state.quality.group }));
+            localStorage.setItem('video-quality', JSON.stringify({ default: player.core.state.quality.group }));
         }
     } catch {}
     playerBufferState.lastReloadAt = Date.now();
@@ -208,27 +201,19 @@ export function doTwitchPlayerTask(task: 'pausePlay' | 'reload', reloadKind?: Re
     // cleared cache), the video still needs unmute after Chrome's autoplay mute on reload.
     setTimeout(() => {
         try {
-            if (currentQualityLS) {
-                localStorage.setItem(lsKeyQuality, currentQualityLS);
-            }
-            if (currentMutedLS) {
-                localStorage.setItem(lsKeyMuted, currentMutedLS);
-            }
-            if (currentVolumeLS) {
-                localStorage.setItem(lsKeyVolume, currentVolumeLS);
-            }
-            if (currentLowLatencyLS !== null) {
-                localStorage.setItem(lsKeyLowLatency, currentLowLatencyLS);
-            }
-            if (currentPersistenceLS !== null) {
-                localStorage.setItem(lsKeyPersistence, currentPersistenceLS);
+            for (const { key, restoreEmpty } of PRESERVED_PLAYER_SETTINGS) {
+                const value = savedSettings.get(key);
+                if (value != null && (value !== '' || restoreEmpty)) {
+                    localStorage.setItem(key, value);
+                }
             }
             // The player's own element, not a separate Twitch ad <video> (#249).
             const video = getPlayerVideoElement();
             // Respect user's mute intent: only force-unmute if LS didn't say mute.
             // Twitch writes video-muted as '{"default":true}' when user muted via UI;
             // Chrome autoplay policy can mute even if user didn't (no LS signal).
-            const userIntendedMute = currentMutedLS && currentMutedLS.includes('"default":true');
+            const savedMuted = savedSettings.get('video-muted');
+            const userIntendedMute = savedMuted && savedMuted.includes('"default":true');
             if (video && video.muted && !userIntendedMute) {
                 video.muted = false;
             }

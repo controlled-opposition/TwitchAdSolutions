@@ -4,6 +4,7 @@
 //     (function runWorker(__vaftInit) { <this bundle> })({ twitchBlobUrl, config });
 //
 // It installs vaft's hooks, then runs Twitch's own worker code in the same worker.
+import { GQL_HEADER_RELAYS } from '../shared/config.ts';
 import { getWasmWorkerJs } from '../shared/wasm-worker.ts';
 import type { PageToWorkerMessage, WorkerFetchResponse, WorkerInit } from '../shared/types.ts';
 import { hookWorkerFetch } from './fetch-hook.ts';
@@ -24,18 +25,11 @@ if (!self.__tasPruneInterval) {
 }
 Object.assign(state, __vaftInit.config);
 self.addEventListener('message', function (e: MessageEvent<PageToWorkerMessage>) {
-    if (e.data.key === 'UpdateClientVersion') {
-        state.ClientVersion = e.data.value;
-    } else if (e.data.key === 'UpdateClientSession') {
-        state.ClientSession = e.data.value;
+    const headerRelay = GQL_HEADER_RELAYS.find((relay) => relay.key === e.data.key);
+    if (headerRelay) {
+        state[headerRelay.field] = e.data.value as string;
     } else if (e.data.key === 'UpdateClientId') {
         state.ClientID = e.data.value;
-    } else if (e.data.key === 'UpdateDeviceId') {
-        state.GQLDeviceID = e.data.value;
-    } else if (e.data.key === 'UpdateClientIntegrityHeader') {
-        state.ClientIntegrityHeader = e.data.value;
-    } else if (e.data.key === 'UpdateAuthorizationHeader') {
-        state.AuthorizationHeader = e.data.value;
     } else if (e.data.key === 'FetchResponse') {
         const responseData = e.data.value;
         const pending = pendingFetchRequests.get(responseData.id);

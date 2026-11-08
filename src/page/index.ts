@@ -1,6 +1,6 @@
 // Page bundle entry: becomes vaft/vaft.user.js (scripts/build.js adds the userscript header).
 import { installHook } from '../shared/hook.ts';
-import { monitorPlayerBuffering } from './buffer-monitor.ts';
+import { startBufferMonitor } from './buffer-monitor.ts';
 import { hookFetch, hookXhr } from './fetch-hook.ts';
 import { doTwitchPlayerTask } from './player.ts';
 import { state } from './state.ts';
@@ -97,7 +97,7 @@ function main() {
     hookFetch();
     // Hook XHR to detect CSAI ad requests that bypass fetch
     hookXhr();
-    monitorPlayerBuffering();
+    startBufferMonitor();
     if (document.readyState === 'complete' || document.readyState === 'interactive') {
         onContentLoaded();
     } else {
