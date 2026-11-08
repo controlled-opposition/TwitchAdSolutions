@@ -1,14 +1,20 @@
 import { pickSharedConfig } from '../shared/config.ts';
-import type { WorkerFetchRequest, WorkerFetchResponse, WorkerInit, WorkerToPageMessage } from '../shared/types.ts';
+import type {
+    AdBlockBannerMessage,
+    WorkerFetchRequest,
+    WorkerFetchResponse,
+    WorkerInit,
+    WorkerToPageMessage,
+} from '../shared/types.ts';
 import { getWasmWorkerJs } from '../shared/wasm-worker.ts';
 import { cancelDriftCorrection } from './drift.ts';
 import { installHook } from '../shared/hook.ts';
 import { maskAsNative } from './mask.ts';
 import { updateAdblockBanner } from './overlay.ts';
-import { doTwitchPlayerTask } from './player.ts';
-import { playerBufferState, state } from './state.ts';
+import { doTwitchPlayerTask, type PlayerTaskOutcome } from './player.ts';
+import { playerBufferState, runtime, state } from './state.ts';
 import { runWorker } from './worker-bundle.ts';
-import { twitchWorkers } from './workers.ts';
+import { postTwitchWorkerMessage, twitchWorkers } from './workers.ts';
 
 // Strings used to detect and handle conflicting Twitch worker overrides (e.g. TwitchNoSub)
 const workerStringConflicts = [
@@ -151,24 +157,23 @@ export function hookWindowWorker() {
             twitchWorkers.push(this);
             this.addEventListener('message', (e: MessageEvent<WorkerToPageMessage>) => {
                 if (e.data.key === 'UpdateAdBlockBanner') {
-                    updateAdblockBanner(e.data);
-                    // Track backup stream switches (start and end of ad break)
-                    if (e.data.hasAds !== !!playerBufferState.inAdBreak) {
-                        playerBufferState.lastBackupSwitchAt = Date.now();
-                        // Reset position tracking on ad-end so the stream switch gap isn't detected as a jump
-                        if (!e.data.hasAds) {
-                            playerBufferState.position = 0;
-                        }
-                    }
-                    playerBufferState.inAdBreak = !!e.data.hasAds;
-                    // Clear drift catch-up when ads start — don't run 1.1x during ad handling
-                    if (e.data.hasAds) {
-                        cancelDriftCorrection();
-                    }
+                    onAdBreakUpdate(e.data);
                 } else if (e.data.key === 'PauseResumePlayer') {
                     doTwitchPlayerTask('pausePlay');
                 } else if (e.data.key === 'ReloadPlayer') {
-                    doTwitchPlayerTask('reload', e.data.kind);
+                    const { kind, requestId } = e.data;
+                    let outcome: PlayerTaskOutcome = 'not-done';
+                    try {
+                        outcome = doTwitchPlayerTask('reload', kind);
+                    } finally {
+                        // Answer even if the task threw, so the worker's request doesn't hang.
+                        if (requestId) {
+                            postTwitchWorkerMessage('ReloadResult', {
+                                requestId,
+                                outcome: outcome === 'done' ? 'reloaded' : outcome,
+                            });
+                        }
+                    }
                 }
             });
             this.addEventListener('message', async (event: MessageEvent<WorkerToPageMessage>) => {
@@ -217,6 +222,25 @@ export function hookWindowWorker() {
             }
         },
     });
+}
+// The page's mirror of the worker's ad-break state (worker: StreamInfo.Break). Every banner
+// update carries it; this is the only place it is applied.
+function onAdBreakUpdate(data: AdBlockBannerMessage) {
+    runtime.isActivelyStrippingAds = !!data.isStrippingAdSegments;
+    // Track backup stream switches (start and end of ad break)
+    if (data.hasAds !== playerBufferState.inAdBreak) {
+        playerBufferState.lastBackupSwitchAt = Date.now();
+        // Reset position tracking on ad-end so the stream switch gap isn't detected as a jump
+        if (!data.hasAds) {
+            playerBufferState.position = 0;
+        }
+    }
+    playerBufferState.inAdBreak = !!data.hasAds;
+    // Clear drift catch-up when ads start — don't run 1.1x during ad handling
+    if (data.hasAds) {
+        cancelDriftCorrection();
+    }
+    updateAdblockBanner(data);
 }
 async function handleWorkerFetchRequest(fetchRequest: WorkerFetchRequest): Promise<WorkerFetchResponse> {
     // 5s AbortController timeout. The worker uses this path for GQL requests

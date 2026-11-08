@@ -8,7 +8,7 @@ import { loadLocalStorageConfig, onContentLoaded } from './storage.ts';
 import { hookWindowWorker } from './worker-hook.ts';
 import { postTwitchWorkerMessage } from './workers.ts';
 
-const ourTwitchAdSolutionsVersion = 97; // Used to prevent conflicts with outdated versions of the scripts
+const ourTwitchAdSolutionsVersion = 98; // Used to prevent conflicts with outdated versions of the scripts
 
 function main() {
     // Skip injection in nested frames that aren't legitimate Twitch embed contexts.

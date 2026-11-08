@@ -94,10 +94,8 @@ export function hookWorkerFetch(): boolean {
                         }
                     }
                     if (streamInfo == null || streamInfo.EncodingsM3U8 == null) {
-                        // Clear reload-pending flag from a prior stream session — without this,
-                        // a reload triggered on the previous channel bleeds into the new channel's
-                        // LastPlayerReload and its post-ad re-entry guards.
-                        state.HasTriggeredPlayerReload = false;
+                        // A new StreamInfo starts with no reload pending (ReloadPending is per
+                        // stream), so a reload on the previous session can't bleed into this one.
                         console.log(
                             '[AD DEBUG] New stream session — channel: ' +
                                 channelName +
@@ -241,7 +239,7 @@ export function hookWorkerFetch(): boolean {
                     // reload-timing checks treat the session-creation timestamp as a recent
                     // reload, even though no reload had actually occurred.
                     return replaceServerTimeInM3u8(
-                        (streamInfo.IsUsingModifiedM3U8 && streamInfo.ModifiedM3U8) || streamInfo.EncodingsM3U8,
+                        (streamInfo.CodecSwap !== 'native' && streamInfo.ModifiedM3U8) || streamInfo.EncodingsM3U8,
                         serverTime,
                     );
                 });

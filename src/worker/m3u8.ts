@@ -1,10 +1,20 @@
-import type { PlayerType, StreamInfo } from '../shared/types.ts';
+import type { AdBreak, PlayerType, ResolutionInfo, StreamInfo } from '../shared/types.ts';
 import { getMatchedAdSignifiers, hasAdTags, stripAdSegments } from './ads.ts';
+import { createAdBreak, decideBreakEndAction, onAdFreePoll, onAdPoll } from './ad-break.ts';
+import { stepEarlyReload } from './early-reload.ts';
 import { notifyAdComplete } from './spoof.ts';
-import { getStreamUrlForResolution, isEnhancedCodec } from './playlist.ts';
+import { getStreamVariantForResolution, isCodecMismatch, isEnhancedCodec } from './playlist.ts';
 import { getAccessToken } from './gql.ts';
+import { requestReload } from './reload.ts';
 import { state } from './state.ts';
 import { postToPage } from './post.ts';
+
+/** Within this long after a player reload, a new break doesn't start another codec-swap reload. */
+const POST_AD_REENTRY_GUARD_MS = 8000;
+/** All-stripped polls on the sticky CSAI path before the escape hatch tries backups (~8s). */
+const STICKY_ESCAPE_POLLS = 4;
+/** Every Nth break won by autoplay-first re-probes the Source tier (channel recovery check). */
+const FAST_AUTOPLAY_REPROBE_INTERVAL = 5;
 
 // Core ad-blocking logic: detect ads in m3u8, fetch backup streams, strip ad segments
 export async function processM3U8(url: string, textStr: string, realFetch: typeof fetch): Promise<string> {
@@ -13,8 +23,10 @@ export async function processM3U8(url: string, textStr: string, realFetch: typeo
         return textStr;
     }
     streamInfo.LastSeenAt = Date.now();
-    if (state.HasTriggeredPlayerReload) {
-        state.HasTriggeredPlayerReload = false;
+    // The first poll after a page-side reload marks when the reloaded player started polling:
+    // that is what the minimal-requests window and the post-ad re-entry guards measure from.
+    if (streamInfo.ReloadPending) {
+        streamInfo.ReloadPending = false;
         streamInfo.LastPlayerReload = Date.now();
     }
     // Detection diagnostic: if Twitch shuts a stream down (anti-ad-block detection
@@ -38,831 +50,693 @@ export async function processM3U8(url: string, textStr: string, realFetch: typeo
         }
     }
     const haveAdTags = hasAdTags(textStr) || state.SimulatedAdsDepth > 0;
-    // Cache the clean main stream m3u8 for all-stripped recovery fallback.
-    // Updated during non-ad polls (outside of any ad break), so by the time an ad
-    // break starts, streamInfo.LastCleanNativeM3U8 holds a snapshot ~1-2 seconds old
-    // with several live segments. When heavy SSAI breaks leave the main playlist
-    // entirely stripped, stripAdSegments replays this snapshot instead of the thin
-    // RecoverySegments array — typically gives the player 4-6 live segments of
-    // content to chew on vs the 1-2 cached individual segments.
-    // Mirrors TTV-AB src/modules/processor.ts:733-736.
-    if (!haveAdTags && !streamInfo.IsShowingAd && textStr.indexOf('#EXTINF') !== -1) {
+    if (haveAdTags) {
+        return handleAdPoll(streamInfo, url, textStr, realFetch);
+    }
+    const brk = streamInfo.Break;
+    if (brk) {
+        handleAdFreePoll(streamInfo, brk, textStr);
+    } else if (textStr.indexOf('#EXTINF') !== -1) {
+        // Cache the clean main stream m3u8 for all-stripped recovery fallback: by the time a
+        // break starts, this holds a snapshot ~1-2s old with several live segments, which
+        // stripAdSegments replays instead of the thin per-segment recovery cache.
+        // Mirrors TTV-AB src/modules/processor.ts:733-736.
         streamInfo.LastCleanNativeM3U8 = textStr;
         streamInfo.LastCleanNativePlaylistAt = Date.now();
     }
-    if (haveAdTags) {
-        // Bounce-tolerant reset: keep PendingAdEndAt alive across short flips back to ad-marked
-        // so the slow-path max-wait gate can still fire when bouncing markers prevent
-        // CleanPlaylistCount from reaching threshold. Mirrors TTV-AB v6.6.7 #1.
-        const adEndStalenessMs = 12000;
-        if (streamInfo.PendingAdEndAt && Date.now() - streamInfo.PendingAdEndAt < adEndStalenessMs) {
-            streamInfo.AdEndBounceCount = (streamInfo.AdEndBounceCount || 0) + 1;
-        } else {
-            streamInfo.PendingAdEndAt = 0;
-            streamInfo.AdEndBounceCount = 0;
-        }
-        streamInfo.CleanPlaylistCount = 0;
-        streamInfo.IsMidroll = textStr.includes('"MIDROLL"') || textStr.includes('"midroll"');
-        if (!streamInfo.IsShowingAd) {
-            streamInfo.IsShowingAd = true;
-            streamInfo.AdBreakStartedAt = Date.now();
-            const podLengthMatch = textStr.match(/X-TV-TWITCH-AD-POD-LENGTH="(\d+)"/);
-            const podLength = podLengthMatch ? parseInt(podLengthMatch[1], 10) : 1;
-            // Reset early-reload state for new ad break; allow up to one early reload per ad in pod
-            streamInfo.PodLength = podLength;
-            streamInfo.EarlyReloadTriggered = false;
-            streamInfo.EarlyReloadCount = 0;
-            streamInfo.EarlyReloadAtPoll = 0;
-            // Track high-confidence ad markers to distinguish real ads from false-positive signifier matches
-            streamInfo.HasConfirmedAdAttrs =
-                textStr.includes('X-TV-TWITCH-AD-AD-SESSION-ID') || textStr.includes('X-TV-TWITCH-AD-RADS-TOKEN');
-            streamInfo.CycleRescuedThisBreak = false;
-            streamInfo.LastCommittedBackupPlayerType = null;
-            streamInfo.FreezeStartedAt = 0;
-            streamInfo.CsaiOnlyThisBreak = false; // Reset sticky CSAI flag for new break
-            console.log(
-                '[AD DEBUG] Ad detected — type: ' +
-                    (streamInfo.IsMidroll ? 'midroll' : 'preroll') +
-                    ', channel: ' +
-                    streamInfo.ChannelName +
-                    ', pod: ' +
-                    podLength +
-                    ' ad(s) (~' +
-                    podLength * 30 +
-                    's expected), signifiers: ' +
-                    getMatchedAdSignifiers(textStr).join(', '),
-            );
-            postToPage({
-                key: 'UpdateAdBlockBanner',
-                isMidroll: streamInfo.IsMidroll,
-                hasAds: streamInfo.IsShowingAd,
-                isStrippingAdSegments: false,
-            });
-        }
-        // Spoof ad-completion every ad-laden poll (not just break-start). Twitch
-        // discloses each ad's DATERANGE only as that ad starts, so multi-ad pods
-        // surface one ad per poll — notifyAdComplete dedups via SpoofedAdIds so
-        // each ad is spoofed once across the break (full N/N coverage).
-        if (!state.DisableAdSpoofing) {
-            // Defer off the playlist critical path — synchronous matchAll + parse +
-            // JSON.stringify here delays the modified-m3u8 return to the player
-            // (ad-break stutter). Next tick is fine; spoof beacons aren't time-critical.
-            // (GosuDRM TTV-AB v8.0.0 field finding on this same spoof code.)
-            setTimeout(() => notifyAdComplete(textStr, streamInfo), 0);
-        }
-        // textStr is not modified before the CSAI fast-path check below, so split it once for both.
-        const lines = textStr.split(/\r?\n/);
-        if (!streamInfo.IsMidroll) {
-            for (let i = 0; i < lines.length; i++) {
-                const line = lines[i];
-                if (line.startsWith('#EXTINF') && lines.length > i + 1) {
-                    if (!line.includes(',live') && !streamInfo.RequestedAds.has(lines[i + 1])) {
-                        // Only request one .ts file per .m3u8 request to avoid making too many requests
-                        streamInfo.RequestedAds.add(lines[i + 1]);
-                        fetch(lines[i + 1])
-                            .then((response) => response.blob())
-                            .catch(() => {});
-                        break;
-                    }
-                }
-            }
-        }
-        const currentResolution = streamInfo.Urls[url];
-        if (!currentResolution) {
-            console.log('Ads will leak due to missing resolution info for ' + url);
-            return stripAdSegments(textStr, false, streamInfo);
-        }
-        // AV1 parity: v68.5.0 added AV1 ('av0*') to the ModifiedM3U8 build on the master
-        // side, but this media-playlist trigger still only matched hev/hvc — so a
-        // native-AV1 stream built the AVC swap and then never reloaded onto it, playing
-        // AV1 straight into the strip path. Ported from testing v674.
-        const isEnhanced = isEnhancedCodec(currentResolution.Codecs);
-        // Post-ad reload-loop guard: at end of break, IsUsingModifiedM3U8 is reset to false.
-        // If post-ad continuation markers arrive within ~8s, the next ad-detect fires the
-        // HEVC reload AGAIN because the !IsUsingModifiedM3U8 condition is satisfied — causing
-        // a redundant player teardown/rebuild cycle ~seconds after the previous reload
-        // already settled. Skip the reload if we just reloaded recently; the backup-stream
-        // path will handle this break instead.
-        const postAdReentryGuardMs = 8000;
-        const recentlyReloaded =
-            streamInfo.LastPlayerReload && Date.now() - streamInfo.LastPlayerReload < postAdReentryGuardMs;
-        if (
-            ((isEnhanced && !state.SkipPlayerReloadOnHevc) || state.AlwaysReloadPlayerOnAd) &&
-            streamInfo.ModifiedM3U8 &&
-            !streamInfo.IsUsingModifiedM3U8 &&
-            !recentlyReloaded
-        ) {
-            streamInfo.IsUsingModifiedM3U8 = true;
-            streamInfo.LastPlayerReload = Date.now();
-            postToPage({
-                key: 'ReloadPlayer',
-            });
-        }
-        // Sticky CSAI fast path: if a prior poll in THIS break already confirmed the break
-        // is CSAI-only (all segments live on poll 1), stay on the fast path for the rest
-        // of the break. stripAdSegments still handles any real EXTINF ad segments that
-        // show up on later polls (they get cached and the fetch hook returns BLANK_MP4),
-        // so ads are blocked even without the backup switch. Skipping backup search for
-        // the whole CSAI break saves ~20 wasted fetches per break — the backup wouldn't
-        // help anyway since every player type has the same CSAI ads. Flag is cleared
-        // only at break end (IsShowingAd=false path).
-        // Sticky CSAI escape hatch (PreferLowQualityBackup): if the sticky path has
-        // been stuck in all-stripped state for too long (~8s), fall through to backup
-        // search. Gives heavy-SSAI channels a way out of the sticky freeze by trying
-        // Source backups + autoplay fallback instead of sitting in recovery loop.
-        if (
-            state.PreferLowQualityBackup &&
-            streamInfo.CsaiOnlyThisBreak &&
-            (streamInfo.ConsecutiveAllStrippedPolls || 0) >= 4
-        ) {
-            const stuckPolls = streamInfo.ConsecutiveAllStrippedPolls;
-            const recoveryCacheSize = streamInfo.RecoverySegments?.length || 0;
-            const earlyReloadInfo = (streamInfo.EarlyReloadCount || 0) + '/' + Math.max(1, streamInfo.PodLength || 1);
-            console.log(
-                '[AD DEBUG] Sticky CSAI escape hatch — stuck ' +
-                    stuckPolls +
-                    ' polls (~' +
-                    stuckPolls * 2 +
-                    's), EarlyReloadCount=' +
-                    earlyReloadInfo +
-                    ', recovery cache=' +
-                    recoveryCacheSize +
-                    ' segments, falling through to backup search',
-            );
-            streamInfo.CsaiOnlyThisBreak = false;
-            streamInfo.EscapeHatchFired = true;
-        }
-        if (streamInfo.CsaiOnlyThisBreak && !streamInfo.IsUsingModifiedM3U8) {
-            textStr = stripAdSegments(textStr, false, streamInfo);
-            // Early reload during prolonged freeze — mirrors the check in the normal
-            // backup-search path (line ~952) which we'd otherwise skip entirely by
-            // returning early from the sticky path. Without this, heavy SSAI breaks
-            // on CSAI-confirmed streams leave the player replaying the thin recovery
-            // cache for the full break duration (observed: 35.9s freeze on pod-1
-            // break, 3 all-stripped polls, 1-segment recovery cache).
-            // Bounded to maxEarlyReloads per ad in pod so reload loops are impossible.
-            // Check early reload result from previous poll (sticky path returns before the normal-path check)
-            if (streamInfo.EarlyReloadAwaitingResult) {
-                streamInfo.EarlyReloadAwaitingResult = false;
-                console.log('[AD DEBUG] Early reload result (sticky path): still ads — continuing recovery loop');
-                streamInfo.EarlyReloadTriggered = false;
-            }
-            maybeTriggerEarlyReload(streamInfo, ' (sticky path)');
-            postBanner(streamInfo, null);
-            return textStr;
-        }
-        // CSAI fast path: if all segments in the main stream are live, skip backup search.
-        // CSAI ads are delivered outside the m3u8 — the main stream segments are clean.
-        // Just strip tracking URLs and return the main stream directly, avoiding the
-        // backup stream switch that causes a 20-40s rebuffer gap.
-        const hasNonLiveSegment = lines.some((line) => line.startsWith('#EXTINF') && !line.includes(',live'));
-        // BackupSwapFirst (opt-in): skip sticky CSAI path entirely, always fall through to
-        // backup search on ad detect. Mimics TTV-AB's backup-swap-first flow — avoids
-        // MediaSource mixing from strip activity (no BLANK_MP4 injection, no recovery
-        // segment replay), which users report produces fewer loading circles. Cost: extra
-        // fetches on every ad break (token requests for each backup type tried).
-        if (!hasNonLiveSegment && !streamInfo.IsUsingModifiedM3U8 && !state.BackupSwapFirst) {
-            streamInfo.CsaiOnlyThisBreak = true; // Mark break as confirmed CSAI so subsequent polls stay on the fast path
-            console.log('[AD DEBUG] CSAI fast path — all segments live, skipping backup search');
-            textStr = stripAdSegments(textStr, false, streamInfo);
-            postBanner(streamInfo, null);
-            return textStr;
-        }
-        const backupSearchStart = Date.now();
-        let backupColdTokenFetches = 0; // diag: cold-cache token round-trips this backup search (0 = warm — encodings cache hit)
-        let backupPlayerType: PlayerType | null = null;
-        let backupM3u8: string | null = null;
-        let fallbackM3u8 = null;
-        let startIndex = 0;
-        let isDoingMinimalRequests = false;
-        if (streamInfo.LastPlayerReload > Date.now() - state.PlayerReloadMinimalRequestsTime) {
-            // When doing player reload there are a lot of requests which causes the backup stream to load in slow. Briefly prefer using a single version to prevent long delays
-            startIndex = state.PlayerReloadMinimalRequestsPlayerIndex;
-            isDoingMinimalRequests = true;
-        }
-        // Try pinned backup player type first if available
-        // When PreferLowQualityBackup is enabled, append 'autoplay' (360p) as a last-resort
-        // fallback — mirrors pixeltris's original behavior. Source backups are tried first;
-        // autoplay only kicks in when they're all ad-laden. Keeps Source quality when
-        // available while guaranteeing a clean backup for heavy SSAI breaks.
-        const playerTypesToTry = state.PreferLowQualityBackup
-            ? [...state.BackupPlayerTypes, 'autoplay']
-            : [...state.BackupPlayerTypes];
-        if (streamInfo.PinnedBackupPlayerType) {
-            const pinnedIndex = playerTypesToTry.indexOf(streamInfo.PinnedBackupPlayerType);
-            if (pinnedIndex > 0) {
-                playerTypesToTry.splice(pinnedIndex, 1);
-                playerTypesToTry.unshift(streamInfo.PinnedBackupPlayerType);
-            }
-        }
-        // FastAutoplayFirstTry: when the immediately prior break committed autoplay via
-        // PreferLowQualityBackup escape hatch (all 4 Source types contaminated), this
-        // channel is currently SSAI-uniform — Source-tier probes are wasted ~1.5s of
-        // buffering. Try autoplay first instead. If autoplay is contaminated this time,
-        // iteration falls through to the rest of playerTypesToTry as normal. If a
-        // Source-tier type wins (channel recovered), the "Source committed" branch
-        // below resets LastBreakUsedEscapeHatch so the next break does normal iteration.
-        // Default on as of v67.1.0. Opt-out via twitchAdSolutions_fastAutoplayFirstTry=false.
-        //
-        // Periodic re-probe: every Nth consecutive fast-autoplay win, force a full
-        // Source-tier probe to catch channel recovery (e.g., Twitch reverses universal
-        // CSAI delivery). Without this, once a channel hits fast-autoplay it stays on
-        // 360p for the entire session — Source-tier is never re-tested so we'd miss
-        // a Source-clean break. Costs ~1.5-2s of probe-loop once every N breaks; N=5
-        // means ~25-50min between re-probes at typical break density.
-        if (state.FastAutoplayFirstTry && streamInfo.LastBreakUsedEscapeHatch && state.PreferLowQualityBackup) {
-            const FastAutoplayReprobeInterval = 5;
-            const consecutive = streamInfo.FastAutoplayConsecutive || 0;
-            if (consecutive >= FastAutoplayReprobeInterval) {
-                // Re-probe: skip the autoplay reorder this break — let Source-tier be
-                // tested. Reset counter; if Source-tier still all ad-laden, the autoplay
-                // commit path below will set LastBreakUsedEscapeHatch=true again and the
-                // cycle resumes. If Source-tier wins, LastBreakUsedEscapeHatch clears.
-                streamInfo.FastAutoplayConsecutive = 0;
-                if (!streamInfo.LoggedFastAutoplayReprobeThisBreak) {
-                    streamInfo.LoggedFastAutoplayReprobeThisBreak = true;
-                    console.log(
-                        '[AD DEBUG] Fast-autoplay re-probe — testing Source-tier after ' +
-                            consecutive +
-                            ' consecutive fast-autoplay breaks (channel-recovery check)',
-                    );
-                }
-            } else {
-                const autoplayIdx = playerTypesToTry.indexOf('autoplay');
-                if (autoplayIdx > 0) {
-                    playerTypesToTry.splice(autoplayIdx, 1);
-                    playerTypesToTry.unshift('autoplay');
-                    if (!streamInfo.LoggedFastAutoplayThisBreak) {
-                        streamInfo.LoggedFastAutoplayThisBreak = true;
-                        console.log(
-                            '[AD DEBUG] Fast-autoplay first-try — prior break exhausted Source-tier; probing autoplay first',
-                        );
-                    }
-                }
-            }
-        }
-        // Real-time contamination reorder: on poll 2+ of a break, move types that were
-        // already logged as ad-laden earlier in the same break to the end of iteration.
-        // Lets untried/clean types (typically autoplay on SSAI-heavy channels like warn)
-        // get tried first instead of re-checking types we already know are contaminated.
-        // LoggedBackupAdsByType is populated below at the "also has ads" log site and
-        // cleared at end-of-break, so this is per-break adaptive.
-        if (streamInfo.LoggedBackupAdsByType.size > 0) {
-            const clean = [];
-            const contam = [];
-            for (const t of playerTypesToTry) {
-                if (streamInfo.LoggedBackupAdsByType.has(t)) contam.push(t);
-                else clean.push(t);
-            }
-            if (contam.length > 0 && clean.length > 0) {
-                playerTypesToTry.length = 0;
-                playerTypesToTry.push(...clean, ...contam);
-                if (!streamInfo.LoggedContamReorderThisBreak) {
-                    streamInfo.LoggedContamReorderThisBreak = true;
-                    console.log(
-                        '[AD DEBUG] Contamination-aware reorder — trying [' +
-                            clean.join(', ') +
-                            '] before known-contaminated [' +
-                            contam.join(', ') +
-                            ']',
-                    );
-                }
-            }
-        }
-        for (
-            let playerTypeIndex = startIndex;
-            !backupM3u8 && playerTypeIndex < playerTypesToTry.length;
-            playerTypeIndex++
-        ) {
-            const playerType = playerTypesToTry[playerTypeIndex];
-            const failedAt = streamInfo.FailedBackupPlayerTypes.get(playerType);
-            // 5s (was 15s): in the CSAI-flip world a contaminated backup type can
-            // recover within seconds; the 15s lockout kept us off a now-clean type far
-            // too long (TTV-AB/GosuDRM v8.0.0 "reduced ad-induced stalling"). Tradeoff:
-            // ~3x more retry fetches — watched via the cold/warm token-fetch log (#228).
-            if (failedAt && Date.now() - failedAt < 5000) {
-                continue;
-            }
-            for (let i = 0; i < 2; i++) {
-                // This caches the m3u8 if it doesn't have ads. If the already existing cache has ads it fetches a new version (second loop)
-                let isFreshM3u8 = false;
-                let encodingsM3u8 = streamInfo.BackupEncodingsM3U8Cache[playerType];
-                if (!encodingsM3u8) {
-                    isFreshM3u8 = true;
-                    backupColdTokenFetches++;
-                    try {
-                        const accessTokenResponse = await getAccessToken(streamInfo.ChannelName, playerType);
-                        if (accessTokenResponse.status === 200) {
-                            const accessToken = await accessTokenResponse.json();
-                            // Twitch returns streamPlaybackAccessToken in two observed shapes:
-                            //   { data: { streamPlaybackAccessToken: {...} } } (most player types)
-                            //   { streamPlaybackAccessToken: {...} } (flatter, observed for 'embed')
-                            // Accept either. Field-observed silently dropping embed backup otherwise.
-                            const spat =
-                                accessToken?.data?.streamPlaybackAccessToken || accessToken?.streamPlaybackAccessToken;
-                            if (!spat) {
-                                const errInfo = accessToken?.errors
-                                    ? ' errors: ' + JSON.stringify(accessToken.errors).substring(0, 300)
-                                    : '';
-                                console.log(
-                                    '[AD DEBUG] GQL response missing streamPlaybackAccessToken for ' +
-                                        playerType +
-                                        '. Response keys: ' +
-                                        JSON.stringify(Object.keys(accessToken || {})) +
-                                        errInfo,
-                                );
-                                recordTokenFetchFailure(streamInfo, playerType);
-                                continue;
-                            }
-                            const urlInfo = new URL(
-                                'https://usher.ttvnw.net/api/' +
-                                    (state.V2API ? 'v2/' : '') +
-                                    'channel/hls/' +
-                                    streamInfo.ChannelName +
-                                    '.m3u8' +
-                                    streamInfo.UsherParams,
-                            );
-                            urlInfo.searchParams.set('sig', spat.signature);
-                            urlInfo.searchParams.set('token', spat.value);
-                            const encodingsM3u8Response = await realFetch(urlInfo.href);
-                            if (encodingsM3u8Response.status === 200) {
-                                encodingsM3u8 = streamInfo.BackupEncodingsM3U8Cache[playerType] =
-                                    await encodingsM3u8Response.text();
-                                // Reset detection diagnostic counter on success — token fetched, m3u8 fetched.
-                                streamInfo.ConsecutiveTokenFetchFailures = 0;
-                                streamInfo.LoggedTokenFailureStreak = false;
-                            } else {
-                                console.log(
-                                    '[AD DEBUG] Usher HTTP ' + encodingsM3u8Response.status + ' for ' + playerType,
-                                );
-                            }
-                        } else {
-                            let errorBody = '';
-                            try {
-                                errorBody = ' — ' + (await accessTokenResponse.text()).substring(0, 200);
-                            } catch {}
-                            console.log(
-                                '[AD DEBUG] Access token HTTP ' +
-                                    accessTokenResponse.status +
-                                    ' for ' +
-                                    playerType +
-                                    (accessTokenResponse.status === 403
-                                        ? ' (integrity: ' + (state.ClientIntegrityHeader ? 'present' : 'missing') + ')'
-                                        : '') +
-                                    errorBody,
-                            );
-                            recordTokenFetchFailure(streamInfo, playerType);
-                        }
-                    } catch (err) {
-                        console.log('[AD DEBUG] Access token failed for ' + playerType + ': ' + (err as Error).message);
-                        recordTokenFetchFailure(streamInfo, playerType);
-                    }
-                }
-                if (encodingsM3u8) {
-                    try {
-                        const streamM3u8Url = getStreamUrlForResolution(encodingsM3u8, currentResolution);
-                        if (!streamM3u8Url) {
-                            // Previously fetch(null), which threw on the blob-relative URL; same catch below, clearer message.
-                            throw new Error('no variant playlist in the backup encodings');
-                        }
-                        const streamM3u8Response = await realFetch(streamM3u8Url);
-                        if (streamM3u8Response.status === 200) {
-                            const m3u8Text = await streamM3u8Response.text();
-                            if (m3u8Text) {
-                                if (playerType === state.FallbackPlayerType) {
-                                    fallbackM3u8 = m3u8Text;
-                                }
-                                const backupHasAds = hasAdTags(m3u8Text);
-                                if (
-                                    (!backupHasAds &&
-                                        (state.SimulatedAdsDepth === 0 ||
-                                            playerTypeIndex >= state.SimulatedAdsDepth - 1)) ||
-                                    (!fallbackM3u8 && playerTypeIndex >= playerTypesToTry.length - 1)
-                                ) {
-                                    if (streamInfo.ConsecutiveAllStrippedPolls >= 1 && !backupHasAds) {
-                                        const prevType = streamInfo.LastCommittedBackupPlayerType;
-                                        if (prevType && prevType !== playerType) {
-                                            console.log(
-                                                '[AD DEBUG] Cycle switched to different clean type (' +
-                                                    playerType +
-                                                    ', was ' +
-                                                    prevType +
-                                                    ') during freeze — recovered without reload',
-                                            );
-                                            // Only mark as cycle-rescued when we ACTUALLY switched player types.
-                                            // Natural recovery (same type became clean) still needs the end-of-break
-                                            // reload to refresh the player buffer — skipping it leaves the player
-                                            // stuck with low buffer and the buffer monitor unable to recover.
-                                            streamInfo.CycleRescuedThisBreak = true;
-                                        } else {
-                                            console.log(
-                                                '[AD DEBUG] Same backup type (' +
-                                                    playerType +
-                                                    ') became clean during freeze — natural recovery',
-                                            );
-                                        }
-                                    }
-                                    backupPlayerType = playerType;
-                                    backupM3u8 = m3u8Text;
-                                    break;
-                                }
-                                if (backupHasAds) {
-                                    if (!streamInfo.LoggedBackupAdsByType.has(playerType)) {
-                                        streamInfo.LoggedBackupAdsByType.add(playerType);
-                                        console.log('[AD DEBUG] Backup stream (' + playerType + ') also has ads');
-                                    }
-                                }
-                                if (isDoingMinimalRequests) {
-                                    backupPlayerType = playerType;
-                                    backupM3u8 = m3u8Text;
-                                    break;
-                                }
-                                // Cycle through all player types looking for a clean backup. Only commit
-                                // an ad-laden backup as a last resort when we've exhausted all options.
-                                // PR #89 previously committed the first ad-laden type immediately — that
-                                // caused the v58 freeze regression (issue #112) because the strip+recovery
-                                // loop would engage even when a clean alternate was available on another
-                                // player type.
-                                if (backupHasAds && playerTypeIndex >= playerTypesToTry.length - 1) {
-                                    console.log(
-                                        '[AD DEBUG] All backup player types ad-laden — taking ' +
-                                            playerType +
-                                            ' as last-resort fallback (strip+recovery path will engage)',
-                                    );
-                                    backupPlayerType = playerType;
-                                    backupM3u8 = m3u8Text;
-                                    break;
-                                }
-                            }
-                        } else {
-                            console.log(
-                                '[AD DEBUG] Backup stream fetch failed for ' +
-                                    playerType +
-                                    ' (status ' +
-                                    streamM3u8Response.status +
-                                    ')',
-                            );
-                        }
-                    } catch (err) {
-                        console.log('[AD DEBUG] Backup stream error for ' + playerType + ': ' + (err as Error).message);
-                    }
-                }
-                streamInfo.BackupEncodingsM3U8Cache[playerType] = null;
-                if (isFreshM3u8) {
+    postBanner(streamInfo);
+    return textStr;
+}
+
+// An ad-marked poll: start the break if needed, then serve the CSAI fast path or a backup.
+async function handleAdPoll(
+    streamInfo: StreamInfo,
+    url: string,
+    textStr: string,
+    realFetch: typeof fetch,
+): Promise<string> {
+    let brk = streamInfo.Break;
+    const isMidroll = textStr.includes('"MIDROLL"') || textStr.includes('"midroll"');
+    if (brk) {
+        onAdPoll(brk);
+        brk.IsMidroll = isMidroll;
+    } else {
+        brk = streamInfo.Break = createAdBreak(textStr);
+        brk.IsMidroll = isMidroll;
+        console.log(
+            '[AD DEBUG] Ad detected — type: ' +
+                (isMidroll ? 'midroll' : 'preroll') +
+                ', channel: ' +
+                streamInfo.ChannelName +
+                ', pod: ' +
+                brk.PodLength +
+                ' ad(s) (~' +
+                brk.PodLength * 30 +
+                's expected), signifiers: ' +
+                getMatchedAdSignifiers(textStr).join(', '),
+        );
+        postToPage({
+            key: 'UpdateAdBlockBanner',
+            isMidroll,
+            hasAds: true,
+            isStrippingAdSegments: false,
+        });
+    }
+    // Spoof ad-completion every ad-laden poll (not just break-start). Twitch
+    // discloses each ad's DATERANGE only as that ad starts, so multi-ad pods
+    // surface one ad per poll — notifyAdComplete dedups via SpoofedAdIds so
+    // each ad is spoofed once across the break (full N/N coverage).
+    if (!state.DisableAdSpoofing) {
+        // Defer off the playlist critical path — synchronous matchAll + parse +
+        // JSON.stringify here delays the modified-m3u8 return to the player
+        // (ad-break stutter). Next tick is fine; spoof beacons aren't time-critical.
+        // (GosuDRM TTV-AB v8.0.0 field finding on this same spoof code.)
+        const spoofBreak = brk;
+        setTimeout(() => notifyAdComplete(textStr, spoofBreak), 0);
+    }
+    // textStr is not modified before the CSAI fast-path check below, so split it once for both.
+    const lines = textStr.split(/\r?\n/);
+    if (!brk.IsMidroll) {
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i];
+            if (line.startsWith('#EXTINF') && lines.length > i + 1) {
+                if (!line.includes(',live') && !brk.RequestedAds.has(lines[i + 1])) {
+                    // Only request one .ts file per .m3u8 request to avoid making too many requests
+                    brk.RequestedAds.add(lines[i + 1]);
+                    fetch(lines[i + 1])
+                        .then((response) => response.blob())
+                        .catch(() => {});
                     break;
                 }
             }
         }
-        if (!backupM3u8 && fallbackM3u8) {
-            // Don't fall back to a type we've already marked contaminated this break.
-            // Without this guard, when all Source types go ad-laden mid-break the iteration
-            // ends with no clean commit AND fallbackM3u8 still pointing at FallbackPlayerType's
-            // ad-laden m3u8 — we'd silently re-commit the same contaminated site on every poll
-            // (no "Blocking ads" log because ActiveBackupPlayerType unchanged), and the user
-            // sees the full ad pod with no indication of failure. Better to leave backupM3u8
-            // null and let the "No ad-free backup stream found" log fire so it's visible.
-            if (streamInfo.LoggedBackupAdsByType.has(state.FallbackPlayerType)) {
-                console.log(
-                    '[AD DEBUG] Skipping fallback to ' +
-                        state.FallbackPlayerType +
-                        ' — marked contaminated this break (' +
-                        [...streamInfo.LoggedBackupAdsByType].join(', ') +
-                        ' all ad-laden)',
-                );
-            } else {
-                backupPlayerType = state.FallbackPlayerType;
-                backupM3u8 = fallbackM3u8;
-            }
-        }
-        // Stale-commit guard: multiple processM3U8 calls can be in flight concurrently for
-        // the same streamInfo (one per m3u8 poll). If this backup search started during the
-        // ad break but completed AFTER a later poll already ran the end-of-break reset
-        // (IsShowingAd = false, ActiveBackupPlayerType = null), committing the backup here
-        // would overwrite the cleared state and feed stale playlist data to the player,
-        // causing buffer reconciliation failures and a forced reload. Check IsShowingAd
-        // here to discard stale results.
-        if (backupM3u8 && backupPlayerType && streamInfo.IsShowingAd) {
-            textStr = backupM3u8;
-            streamInfo.LastCommittedBackupPlayerType = backupPlayerType;
-            if (streamInfo.ActiveBackupPlayerType !== backupPlayerType) {
-                streamInfo.ActiveBackupPlayerType = backupPlayerType;
-                const sourceQualityTypes = ['embed', 'site', 'popout'];
-                // Never pin 'autoplay'. PreferLowQualityBackup keeps autoplay as the LAST
-                // entry in playerTypesToTry so the iteration-end last-resort branch can
-                // commit it when all Source types are ad-laden. Pinning autoplay would
-                // move it to position 0, which makes the last-resort branch commit a
-                // different ad-laden Source type at the new last position instead — user
-                // gets a Source-tier ad-marked backup (strip+recovery path engages,
-                // freezes likely) instead of the intended 360p clean autoplay backup.
-                if (
-                    (state.PinBackupPlayerType && backupPlayerType !== 'autoplay') ||
-                    sourceQualityTypes.includes(backupPlayerType)
-                ) {
-                    streamInfo.PinnedBackupPlayerType = backupPlayerType;
-                }
-                console.log(
-                    `[AD DEBUG] Blocking${streamInfo.IsMidroll ? ' midroll ' : ' '}ads (${backupPlayerType}) — backup found in ${Date.now() - backupSearchStart}ms${backupColdTokenFetches > 0 ? ` (cold cache: ${backupColdTokenFetches} token fetch${backupColdTokenFetches > 1 ? 'es' : ''})` : ' (warm cache)'}`,
-                );
-                if (streamInfo.EscapeHatchFired) {
-                    const qualityTier = backupPlayerType === 'autoplay' ? '360p' : 'Source';
-                    console.log(
-                        '[AD DEBUG] Post-escape backup: ' +
-                            backupPlayerType +
-                            ' (' +
-                            qualityTier +
-                            ') — recovered from sticky-path freeze',
-                    );
-                } else if (backupPlayerType === 'autoplay' && state.PreferLowQualityBackup) {
-                    const sourceTried = streamInfo.LoggedBackupAdsByType.size;
-                    if (sourceTried === 0) {
-                        console.log(
-                            '[AD DEBUG] Autoplay backup committed — 360p pinned from prior break (PreferLowQualityBackup)',
-                        );
-                        // Fast-autoplay won without testing Source-tier — increment re-probe counter
-                        streamInfo.FastAutoplayConsecutive = (streamInfo.FastAutoplayConsecutive || 0) + 1;
-                    } else {
-                        console.log(
-                            '[AD DEBUG] Autoplay backup committed — 360p fallback after ' +
-                                sourceTried +
-                                ' Source type(s) ad-laden (PreferLowQualityBackup)',
-                        );
-                    }
-                    // FastAutoplayFirstTry: only flag the channel as SSAI-uniform when 4 Source
-                    // types were probed and all contaminated. The "0 sourceTried" case (pinned
-                    // from prior break) doesn't add new information.
-                    if (state.FastAutoplayFirstTry && sourceTried >= 4) {
-                        streamInfo.LastBreakUsedEscapeHatch = true;
-                        // Full probe just ran — reset re-probe counter (we just tested Source-tier)
-                        streamInfo.FastAutoplayConsecutive = 0;
-                    }
-                } else if (state.FastAutoplayFirstTry && backupPlayerType !== 'autoplay') {
-                    // Source-tier type committed cleanly — channel recovered. Reset the
-                    // SSAI-uniform signal so next break does normal iteration. Also reset
-                    // the re-probe counter since we just got a Source-tier win.
-                    streamInfo.LastBreakUsedEscapeHatch = false;
-                    streamInfo.FastAutoplayConsecutive = 0;
-                }
-            }
-        } else if (backupM3u8 && !streamInfo.IsShowingAd) {
+    }
+    const currentResolution = streamInfo.Urls[url];
+    if (!currentResolution) {
+        console.log('Ads will leak due to missing resolution info for ' + url);
+        return stripAdSegments(textStr, false, streamInfo, brk);
+    }
+    // AV1 parity: the ModifiedM3U8 build covers AV1 ('av0*') as well as hev/hvc.
+    const isEnhanced = isEnhancedCodec(currentResolution.Codecs);
+    const codecSwapStarted =
+        ((isEnhanced && !state.SkipPlayerReloadOnHevc) || state.AlwaysReloadPlayerOnAd) &&
+        maybeStartCodecSwap(streamInfo, brk);
+    // Sticky CSAI escape hatch (PreferLowQualityBackup): if the sticky path has
+    // been stuck in all-stripped state for too long (~8s), fall through to backup
+    // search. Gives heavy-SSAI channels a way out of the sticky freeze by trying
+    // Source backups + autoplay fallback instead of sitting in recovery loop.
+    if (
+        state.PreferLowQualityBackup &&
+        brk.Path === 'sticky-csai' &&
+        brk.ConsecutiveAllStrippedPolls >= STICKY_ESCAPE_POLLS
+    ) {
+        const stuckPolls = brk.ConsecutiveAllStrippedPolls;
+        const earlyReloadInfo = brk.EarlyReloadCount + '/' + Math.max(1, brk.PodLength);
+        console.log(
+            '[AD DEBUG] Sticky CSAI escape hatch — stuck ' +
+                stuckPolls +
+                ' polls (~' +
+                stuckPolls * 2 +
+                's), EarlyReloadCount=' +
+                earlyReloadInfo +
+                ', recovery cache=' +
+                brk.RecoverySegments.length +
+                ' segments, falling through to backup search',
+        );
+        brk.Path = 'escaped';
+    }
+    // Sticky CSAI fast path: a prior poll in THIS break confirmed the break is CSAI-only
+    // (all segments live), so stay on the fast path for the rest of the break.
+    // stripAdSegments still handles any real EXTINF ad segments that show up on later
+    // polls (they get cached and the fetch hook returns BLANK_MP4), so ads are blocked
+    // even without the backup switch. Skipping backup search for the whole CSAI break
+    // saves ~20 wasted fetches per break — the backup wouldn't help anyway since every
+    // player type has the same CSAI ads.
+    if (brk.Path === 'sticky-csai' && streamInfo.CodecSwap === 'native') {
+        textStr = stripAdSegments(textStr, false, streamInfo, brk);
+        // Early reload during prolonged freeze: without it, heavy SSAI breaks on
+        // CSAI-confirmed streams leave the player replaying the thin recovery cache for
+        // the full break (observed: 35.9s freeze on a pod-1 break).
+        stepEarlyReload(brk, ' (sticky path)');
+        postBanner(streamInfo, null);
+        return textStr;
+    }
+    // CSAI fast path: if all segments in the main stream are live, skip backup search.
+    // CSAI ads are delivered outside the m3u8 — the main stream segments are clean.
+    // Just strip tracking URLs and return the main stream directly, avoiding the
+    // backup stream switch that causes a 20-40s rebuffer gap.
+    // BackupSwapFirst (default) skips this and always searches for a backup — avoids
+    // MediaSource mixing from strip activity (no BLANK_MP4 injection, no recovery
+    // segment replay), which users report produces fewer loading circles.
+    const hasNonLiveSegment = lines.some((line) => line.startsWith('#EXTINF') && !line.includes(',live'));
+    if (brk.Path === 'probing' && !hasNonLiveSegment && streamInfo.CodecSwap === 'native' && !state.BackupSwapFirst) {
+        brk.Path = 'sticky-csai';
+        console.log('[AD DEBUG] CSAI fast path — all segments live, skipping backup search');
+        textStr = stripAdSegments(textStr, false, streamInfo, brk);
+        postBanner(streamInfo, null);
+        return textStr;
+    }
+    const backup = await searchBackup(streamInfo, brk, currentResolution, realFetch);
+    // Stale-commit guard: several processM3U8 calls can be in flight for the same stream (one
+    // per poll). If this search outlived its break (a later poll ended it, maybe started another),
+    // committing would feed stale playlist data to the player. Strip and hand back the poll
+    // without touching the break that is current now.
+    if (streamInfo.Break !== brk) {
+        if (backup) {
             console.log(
                 '[AD DEBUG] Discarded stale backup commit (' +
-                    backupPlayerType +
+                    backup.playerType +
                     ', ' +
-                    (Date.now() - backupSearchStart) +
+                    (Date.now() - backup.searchStartedAt) +
                     'ms) — break ended during search',
             );
-        } else {
-            console.log(
-                '[AD DEBUG] No ad-free backup stream found — ads may leak. Tried: ' +
-                    playerTypesToTry.slice(startIndex).join(', '),
-            );
         }
-        // TODO: Improve hevc stripping. It should always strip when there is a codec mismatch (both ways)
-        textStr = stripAdSegments(textStr, !!(isEnhanced && streamInfo.ModifiedM3U8), streamInfo);
-        // Log reload outcome on the poll after early reload triggered
-        if (streamInfo.EarlyReloadAwaitingResult) {
-            streamInfo.EarlyReloadAwaitingResult = false;
-            if (textStr.includes(',live') && streamInfo.IsStrippingAdSegments) {
-                console.log('[AD DEBUG] Early reload result: partial — some live segments returned');
-            } else if (!streamInfo.IsStrippingAdSegments) {
-                console.log('[AD DEBUG] Early reload result: clean — freeze ended');
-                // Reset trigger flag so subsequent freezes within the same pod can re-fire (bounded by EarlyReloadCount/PodLength)
-                streamInfo.EarlyReloadTriggered = false;
-            } else {
-                console.log('[AD DEBUG] Early reload result: still ads — continuing recovery loop');
-                streamInfo.EarlyReloadTriggered = false;
-            }
-        }
-        maybeTriggerEarlyReload(streamInfo, '');
-    } else if (streamInfo.IsShowingAd) {
-        // Mark first candidate-end timestamp on the first clean poll seen this break,
-        // so the slow-path max-wait gate below can fire even if subsequent polls bounce
-        // back to ad-marked. The bounce-tolerant haveAdTags reset keeps this alive
-        // across short flips. Mirrors TTV-AB v6.6.7 #1.
-        if (!streamInfo.PendingAdEndAt) {
-            streamInfo.PendingAdEndAt = Date.now();
-        }
-        streamInfo.CleanPlaylistCount++;
-        // Check if the current playlist has live segments — if not, backup stream is dead
-        const hasLiveSegments = textStr.includes(',live');
-        // Independent slow-path max-wait escalation — ends the visible ad cycle even when
-        // marker bouncing keeps CleanPlaylistCount below threshold. Without this, the player
-        // could be wedged on backup indefinitely on channels where Twitch flips markers
-        // in/out faster than 3 consecutive clean polls can land. Mirrors TTV-AB v6.6.7 #4
-        // ("Decoupled Slow-Path Recovery from Clean-Count").
-        const adEndMaxWaitMs = 12000;
-        const elapsedSinceCandidate = Date.now() - streamInfo.PendingAdEndAt;
-        const slowPathReady = streamInfo.PendingAdEndAt > 0 && elapsedSinceCandidate >= adEndMaxWaitMs;
-        // Require 3 consecutive clean polls before declaring ad-end. Previously only 1
-        // when NumStrippedAdSegments === 0 (CSAI-only / backup-swap path) and 2 otherwise,
-        // which let brief clean windows during ongoing breaks flip IsShowingAd false
-        // prematurely on SSAI-uniform channels. TTV-AB hit the same false-positive at 2
-        // probes and bumped to 3 in v6.6.7 ("Ad-End Re-Entry Stability") — Twitch can
-        // serve a clean playlist mid-break before re-injecting markers, and 2 polls
-        // (~4s) wasn't always enough to ride out the bounce.
-        if (streamInfo.CleanPlaylistCount >= 3 || !hasLiveSegments || slowPathReady) {
-            if (slowPathReady && streamInfo.CleanPlaylistCount < 3) {
-                console.log(
-                    '[AD DEBUG] Slow-path ad-end escalation — ' +
-                        (streamInfo.AdEndBounceCount || 0) +
-                        ' marker bounces, ' +
-                        (elapsedSinceCandidate / 1000).toFixed(1) +
-                        's since first clean poll',
-                );
-            }
-            if (!hasLiveSegments) {
-                console.log('[AD DEBUG] Backup stream has no live segments — forcing immediate reload');
-            }
-            const adBreakDurationSec = streamInfo.AdBreakStartedAt
-                ? ((Date.now() - streamInfo.AdBreakStartedAt) / 1000).toFixed(1)
-                : '?';
-            console.log(
-                '[AD DEBUG] Finished blocking ads — stripped ' +
-                    streamInfo.NumStrippedAdSegments +
-                    ' ad segments, duration: ' +
-                    adBreakDurationSec +
-                    's',
-            );
-            if (streamInfo.TotalAllStrippedPolls > 0) {
-                const reloadInfo = streamInfo.EarlyReloadAtPoll
-                    ? ', early reload at poll ' + streamInfo.EarlyReloadAtPoll
-                    : '';
-                const wallClockFreeze = streamInfo.FreezeStartedAt
-                    ? ((Date.now() - streamInfo.FreezeStartedAt) / 1000).toFixed(1) + 's wall-clock'
-                    : 'unknown';
-                console.log(
-                    '[AD DEBUG] Ad break stats: ' +
-                        streamInfo.TotalAllStrippedPolls +
-                        ' all-stripped polls, freeze duration: ' +
-                        wallClockFreeze +
-                        reloadInfo,
-                );
-            }
-            const hadStrippedSegments = streamInfo.NumStrippedAdSegments > 0;
-            // Read by the reload decision below, after the per-break reset has zeroed it.
-            const totalAllStrippedPolls = streamInfo.TotalAllStrippedPolls;
-            // Only count toward false-positive guard if the m3u8 lacked high-confidence ad markers.
-            // Confirmed ads (with X-TV-TWITCH-AD-AD-SESSION-ID etc.) that produce 0 strips are real ads
-            // we successfully avoided via clean backup — not false positives.
-            if (!hadStrippedSegments && !streamInfo.HasConfirmedAdAttrs) {
-                streamInfo.ConsecutiveZeroStripBreaks++;
-                if (streamInfo.ConsecutiveZeroStripBreaks >= 3) {
-                    console.log(
-                        '[AD DEBUG] Warning: ' +
-                            streamInfo.ConsecutiveZeroStripBreaks +
-                            ' consecutive unconfirmed ad breaks with 0 segments stripped — possible false positive from ad signifiers',
-                    );
-                }
-            } else {
-                // Reset is symmetric with the increment guard above — any positive "break
-                // was handled cleanly" signal resets the false-positive history. Previously
-                // only stripped>0 reset the counter, which let stale suspicious history
-                // bleed across legitimately-handled backup-swap breaks (0 stripped + real
-                // ad attrs) and trigger the warning on partially-stale state.
-                streamInfo.ConsecutiveZeroStripBreaks = 0;
-            }
-            streamInfo.IsShowingAd = false;
-            streamInfo.IsStrippingAdSegments = false;
-            streamInfo.NumStrippedAdSegments = 0;
-            streamInfo.ActiveBackupPlayerType = null;
-            streamInfo.RequestedAds.clear();
-            streamInfo.SpoofedAdIds.clear(); // New break = fresh ad-spoof dedup set
-            streamInfo.FailedBackupPlayerTypes.clear();
-            streamInfo.LoggedBackupAdsByType.clear();
-            streamInfo.LoggedContamReorderThisBreak = false;
-            streamInfo.CleanPlaylistCount = 0;
-            streamInfo.PendingAdEndAt = 0;
-            streamInfo.AdEndBounceCount = 0;
-            streamInfo.ConsecutiveAllStrippedPolls = 0;
-            streamInfo.EarlyReloadTriggered = false;
-            streamInfo.EarlyReloadAwaitingResult = false;
-            streamInfo.EarlyReloadAtPoll = 0;
-            streamInfo.TotalAllStrippedPolls = 0;
-            streamInfo.CsaiOnlyThisBreak = false;
-            streamInfo.EscapeHatchFired = false;
-            streamInfo.HasLoggedAdAttributes = false;
-            streamInfo.HasLoggedUnknownSignifiers = false;
-            streamInfo.LoggedFastAutoplayThisBreak = false;
-            streamInfo.LoggedFastAutoplayReprobeThisBreak = false;
-            // CSAI-only ad break: no segments were stripped — skip reload entirely.
-            if (!hadStrippedSegments) {
-                console.log('[AD DEBUG] CSAI-only ad break (stripped 0) — clearing backup without player action');
-                streamInfo.IsUsingModifiedM3U8 = false;
-                // Exception: if a backup was committed during this break (the BackupSwapFirst
-                // swap, escape hatch, or a cycle rescue), reload to return to the player's own
-                // stream.
-                // - Autoplay (360p): hard reload ('early'). Its token only serves the 360p
-                //   variant ladder, and only 'early' refreshes the access token to restore Source.
-                // - Other types: issue #129 mode D. Nothing was stripped, so no BLANK_MP4 or
-                //   recovery segments went into the MediaSource and the hard-reload flush is
-                //   unnecessary; it just pays the desktop black-screen + play-icon teardown. Soft
-                //   reload ('post-ad') unless SoftReloadNoStrip is turned off, which restores the
-                //   hard flush for anyone seeing A/V desync after backup-swap breaks.
-                if (streamInfo.LastCommittedBackupPlayerType) {
-                    const isAutoplay = streamInfo.LastCommittedBackupPlayerType === 'autoplay';
-                    const soft = !isAutoplay && state.SoftReloadNoStrip;
-                    const reason = isAutoplay
-                        ? 'autoplay (360p) — restoring Source quality'
-                        : streamInfo.LastCommittedBackupPlayerType +
-                          (soft
-                              ? ' — soft, nothing was stripped (SoftReloadNoStrip)'
-                              : ' — flushing MediaSource to prevent A/V desync accumulation');
-                    console.log('[AD DEBUG] End-of-break reload: ' + reason);
-                    streamInfo.LastPlayerReload = Date.now();
-                    postToPage({ key: 'ReloadPlayer', kind: soft ? 'post-ad' : 'early' });
-                }
-            } else {
-                // Skip end-of-break reload when cycle rescue handled the break cleanly:
-                // a freeze of ≤2 polls (~4s) was resolved by switching to a clean backup,
-                // and no early reload was needed. The player is on a healthy backup stream
-                // — reloading just to return to the canonical player type causes an unnecessary
-                // ~1-2s loading circle.
-                const cycleRescuedCleanly =
-                    streamInfo.CycleRescuedThisBreak && totalAllStrippedPolls <= 2 && streamInfo.EarlyReloadCount === 0;
-                if (cycleRescuedCleanly) {
-                    console.log('[AD DEBUG] Cycle rescue handled the break cleanly — skipping end-of-break reload');
-                }
-                // No cooldown here: this is a buffer flush tied to the natural break end, and the
-                // break cycle itself rate-limits it to once per break (#162).
-                const shouldReload =
-                    streamInfo.IsUsingModifiedM3U8 ||
-                    (state.ReloadPlayerAfterAd && hadStrippedSegments && !cycleRescuedCleanly);
-                if (shouldReload) {
-                    streamInfo.IsUsingModifiedM3U8 = false;
-                    streamInfo.LastPlayerReload = Date.now();
-                    // Hard reload: this break stripped segments, and a soft reload keeps the existing
-                    // MediaSource buffer, so timestamp weirdness from strip/BLANK_MP4/recovery
-                    // injection would persist and desync audio/video over time. (No-strip breaks
-                    // take the branch above, where SoftReloadNoStrip applies.)
-                    postToPage({
-                        key: 'ReloadPlayer',
-                        kind: 'early',
-                    });
-                } else {
-                    postToPage({
-                        key: 'PauseResumePlayer',
-                    });
-                }
-            } // end else (non-CSAI path)
-        }
+        textStr = stripAdSegments(textStr, false, streamInfo, brk);
+        postBanner(streamInfo);
+        return textStr;
     }
-    postBanner(streamInfo, streamInfo.ActiveBackupPlayerType);
+    if (backup) {
+        textStr = backup.m3u8;
+        commitBackup(streamInfo, brk, backup.playerType, backup.searchStartedAt, backup.coldTokenFetches);
+    }
+    // Strip every segment when the playlist served can't be decoded by the player's MediaSource:
+    // a backup in another codec family (either way, see isCodecMismatch), or, with no backup, the
+    // native enhanced-codec playlist while the AVC swap exists (the player is being moved off it).
+    const stripAll = backup
+        ? isCodecMismatch(currentResolution.Codecs, backup.codecs)
+        : isEnhanced && !!streamInfo.ModifiedM3U8;
+    textStr = stripAdSegments(textStr, stripAll, streamInfo, brk);
+    // Not on the poll that started the codec-swap reload: that reload already fetches fresh content.
+    stepEarlyReload(brk, '', !codecSwapStarted);
+    postBanner(streamInfo);
     return textStr;
 }
 
-function postBanner(streamInfo: StreamInfo, activeBackupPlayerType: PlayerType | null): void {
-    postToPage({
-        key: 'UpdateAdBlockBanner',
-        isMidroll: streamInfo.IsMidroll,
-        hasAds: streamInfo.IsShowingAd,
-        isStrippingAdSegments: streamInfo.IsStrippingAdSegments,
-        numStrippedAdSegments: streamInfo.NumStrippedAdSegments,
-        activeBackupPlayerType,
+// Codec swap (CodecSwapState): reload the player onto the AVC-only master playlist so it can
+// switch to the (AVC) backups. Once per break; not right after a reload, where post-ad
+// continuation markers would otherwise trigger a redundant teardown/rebuild ~seconds after the
+// previous reload settled.
+function maybeStartCodecSwap(streamInfo: StreamInfo, brk: AdBreak): boolean {
+    if (
+        !streamInfo.ModifiedM3U8 ||
+        streamInfo.CodecSwap !== 'native' ||
+        brk.CodecSwapTried ||
+        (streamInfo.LastPlayerReload && Date.now() - streamInfo.LastPlayerReload < POST_AD_REENTRY_GUARD_MS)
+    ) {
+        return false;
+    }
+    brk.CodecSwapTried = true;
+    streamInfo.CodecSwap = 'switching';
+    streamInfo.LastPlayerReload = Date.now();
+    requestReload('codec-swap', (outcome) => {
+        // Only a reload makes the player fetch the master playlist again (and get the AVC one).
+        if (streamInfo.CodecSwap !== 'switching') return;
+        if (outcome === 'reloaded') {
+            streamInfo.CodecSwap = 'swapped';
+        } else {
+            streamInfo.CodecSwap = 'native';
+            console.log(
+                '[AD DEBUG] Codec-swap reload not done by the page (' + outcome + ') — staying on native codec',
+            );
+        }
     });
+    return true;
 }
 
-// Early reload during a prolonged freeze: if we've been looping recovery segments for N+ polls
-// (~Nx2s), trigger a reload to attempt fresh content. Shared by the sticky CSAI path (which
-// returns before the normal path's call) and the backup-search path. Bounded to one reload per
-// ad in the pod (two when the recovery cache is thin), so reload loops are impossible.
-function maybeTriggerEarlyReload(streamInfo: StreamInfo, pathLabel: string): void {
-    const recoverySize = streamInfo.RecoverySegments.length;
-    const recoveryThin = recoverySize < 3;
-    const maxEarlyReloads = Math.max(recoveryThin ? 2 : 1, streamInfo.PodLength);
-    const effectiveThreshold = recoveryThin ? 1 : state.EarlyReloadPollThreshold;
-    if (
-        state.EarlyReloadPollThreshold <= 0 ||
-        streamInfo.ConsecutiveAllStrippedPolls < effectiveThreshold ||
-        streamInfo.EarlyReloadTriggered ||
-        streamInfo.EarlyReloadCount >= maxEarlyReloads
+// Player types in the order to try them for this poll's backup search.
+function backupOrder(streamInfo: StreamInfo, brk: AdBreak): PlayerType[] {
+    // When PreferLowQualityBackup is enabled, append 'autoplay' (360p) as a last-resort
+    // fallback — mirrors pixeltris's original behavior. Source backups are tried first;
+    // autoplay only kicks in when they're all ad-laden. Keeps Source quality when
+    // available while guaranteeing a clean backup for heavy SSAI breaks.
+    const types: PlayerType[] = state.PreferLowQualityBackup
+        ? [...state.BackupPlayerTypes, 'autoplay']
+        : [...state.BackupPlayerTypes];
+    const moveToFront = (t: PlayerType): boolean => {
+        const index = types.indexOf(t);
+        if (index > 0) {
+            types.splice(index, 1);
+            types.unshift(t);
+            return true;
+        }
+        return false;
+    };
+    if (streamInfo.PinnedBackupPlayerType) {
+        moveToFront(streamInfo.PinnedBackupPlayerType);
+    }
+    if (brk.AutoplayFirst === null) {
+        brk.AutoplayFirst = decideAutoplayFirst(streamInfo);
+    }
+    if (brk.AutoplayFirst && moveToFront('autoplay') && !brk.LoggedAutoplayOrder) {
+        brk.LoggedAutoplayOrder = true;
+        console.log('[AD DEBUG] Fast-autoplay first-try — prior break exhausted Source-tier; probing autoplay first');
+    }
+    // Real-time contamination reorder: on poll 2+ of a break, move types that were
+    // already ad-laden earlier in the same break to the end of iteration, so
+    // untried/clean types (typically autoplay on SSAI-heavy channels) get tried first.
+    if (brk.ContaminatedTypes.size > 0) {
+        const clean = types.filter((t) => !brk.ContaminatedTypes.has(t));
+        const contam = types.filter((t) => brk.ContaminatedTypes.has(t));
+        if (contam.length > 0 && clean.length > 0) {
+            types.length = 0;
+            types.push(...clean, ...contam);
+            if (!brk.LoggedContamReorder) {
+                brk.LoggedContamReorder = true;
+                console.log(
+                    '[AD DEBUG] Contamination-aware reorder — trying [' +
+                        clean.join(', ') +
+                        '] before known-contaminated [' +
+                        contam.join(', ') +
+                        ']',
+                );
+            }
+        }
+    }
+    return types;
+}
+
+// FastAutoplayFirstTry, decided once per break: when a recent break found every Source-tier type
+// ad-laden (SourceTierExhausted), try autoplay first and save ~1.5-2s of probing. Every
+// FAST_AUTOPLAY_REPROBE_INTERVAL'th such break probes Source normally instead, to notice the
+// channel recovering (Twitch reversing CSAI delivery); otherwise it would stay at 360p.
+function decideAutoplayFirst(streamInfo: StreamInfo): boolean {
+    if (!state.FastAutoplayFirstTry || !state.PreferLowQualityBackup || !streamInfo.SourceTierExhausted) {
+        return false;
+    }
+    if (streamInfo.FastAutoplayWins >= FAST_AUTOPLAY_REPROBE_INTERVAL) {
+        console.log(
+            '[AD DEBUG] Fast-autoplay re-probe — testing Source-tier after ' +
+                streamInfo.FastAutoplayWins +
+                ' consecutive fast-autoplay breaks (channel-recovery check)',
+        );
+        streamInfo.FastAutoplayWins = 0;
+        return false;
+    }
+    return true;
+}
+
+interface BackupFound {
+    playerType: PlayerType;
+    m3u8: string;
+    searchStartedAt: number;
+    /** Cold-cache token round-trips this search (0 = warm, encodings cache hit). */
+    coldTokenFetches: number;
+    /** CODECS of the backup variant served. */
+    codecs: string;
+}
+
+// Look for an ad-free backup playlist across player types. Falls back to an ad-laden one only
+// when every type is ad-laden (the strip + recovery path then engages).
+async function searchBackup(
+    streamInfo: StreamInfo,
+    brk: AdBreak,
+    currentResolution: ResolutionInfo,
+    realFetch: typeof fetch,
+): Promise<BackupFound | null> {
+    const backupSearchStart = Date.now();
+    let backupColdTokenFetches = 0;
+    let backupPlayerType: PlayerType | null = null;
+    let backupM3u8: string | null = null;
+    let backupCodecs = '';
+    let fallbackM3u8 = null;
+    let fallbackCodecs = '';
+    let startIndex = 0;
+    let isDoingMinimalRequests = false;
+    if (streamInfo.LastPlayerReload > Date.now() - state.PlayerReloadMinimalRequestsTime) {
+        // When doing player reload there are a lot of requests which causes the backup stream to load in slow. Briefly prefer using a single version to prevent long delays
+        startIndex = state.PlayerReloadMinimalRequestsPlayerIndex;
+        isDoingMinimalRequests = true;
+    }
+    const playerTypesToTry = backupOrder(streamInfo, brk);
+    for (
+        let playerTypeIndex = startIndex;
+        !backupM3u8 && playerTypeIndex < playerTypesToTry.length;
+        playerTypeIndex++
     ) {
+        const playerType = playerTypesToTry[playerTypeIndex];
+        const failedAt = brk.FailedBackupPlayerTypes.get(playerType);
+        // 5s (was 15s): in the CSAI-flip world a contaminated backup type can
+        // recover within seconds; the 15s lockout kept us off a now-clean type far
+        // too long (TTV-AB/GosuDRM v8.0.0 "reduced ad-induced stalling"). Tradeoff:
+        // ~3x more retry fetches — watched via the cold/warm token-fetch log (#228).
+        if (failedAt && Date.now() - failedAt < 5000) {
+            continue;
+        }
+        for (let i = 0; i < 2; i++) {
+            // This caches the m3u8 if it doesn't have ads. If the already existing cache has ads it fetches a new version (second loop)
+            let isFreshM3u8 = false;
+            let encodingsM3u8 = streamInfo.BackupEncodingsM3U8Cache[playerType];
+            if (!encodingsM3u8) {
+                isFreshM3u8 = true;
+                backupColdTokenFetches++;
+                try {
+                    const accessTokenResponse = await getAccessToken(streamInfo.ChannelName, playerType);
+                    if (accessTokenResponse.status === 200) {
+                        const accessToken = await accessTokenResponse.json();
+                        // Twitch returns streamPlaybackAccessToken in two observed shapes:
+                        //   { data: { streamPlaybackAccessToken: {...} } } (most player types)
+                        //   { streamPlaybackAccessToken: {...} } (flatter, observed for 'embed')
+                        // Accept either. Field-observed silently dropping embed backup otherwise.
+                        const spat =
+                            accessToken?.data?.streamPlaybackAccessToken || accessToken?.streamPlaybackAccessToken;
+                        if (!spat) {
+                            const errInfo = accessToken?.errors
+                                ? ' errors: ' + JSON.stringify(accessToken.errors).substring(0, 300)
+                                : '';
+                            console.log(
+                                '[AD DEBUG] GQL response missing streamPlaybackAccessToken for ' +
+                                    playerType +
+                                    '. Response keys: ' +
+                                    JSON.stringify(Object.keys(accessToken || {})) +
+                                    errInfo,
+                            );
+                            recordTokenFetchFailure(streamInfo, brk, playerType);
+                            continue;
+                        }
+                        const urlInfo = new URL(
+                            'https://usher.ttvnw.net/api/' +
+                                (state.V2API ? 'v2/' : '') +
+                                'channel/hls/' +
+                                streamInfo.ChannelName +
+                                '.m3u8' +
+                                streamInfo.UsherParams,
+                        );
+                        urlInfo.searchParams.set('sig', spat.signature);
+                        urlInfo.searchParams.set('token', spat.value);
+                        const encodingsM3u8Response = await realFetch(urlInfo.href);
+                        if (encodingsM3u8Response.status === 200) {
+                            encodingsM3u8 = streamInfo.BackupEncodingsM3U8Cache[playerType] =
+                                await encodingsM3u8Response.text();
+                            // Reset detection diagnostic counter on success — token fetched, m3u8 fetched.
+                            streamInfo.ConsecutiveTokenFetchFailures = 0;
+                            streamInfo.LoggedTokenFailureStreak = false;
+                        } else {
+                            console.log('[AD DEBUG] Usher HTTP ' + encodingsM3u8Response.status + ' for ' + playerType);
+                        }
+                    } else {
+                        let errorBody = '';
+                        try {
+                            errorBody = ' — ' + (await accessTokenResponse.text()).substring(0, 200);
+                        } catch {}
+                        console.log(
+                            '[AD DEBUG] Access token HTTP ' +
+                                accessTokenResponse.status +
+                                ' for ' +
+                                playerType +
+                                (accessTokenResponse.status === 403
+                                    ? ' (integrity: ' + (state.ClientIntegrityHeader ? 'present' : 'missing') + ')'
+                                    : '') +
+                                errorBody,
+                        );
+                        recordTokenFetchFailure(streamInfo, brk, playerType);
+                    }
+                } catch (err) {
+                    console.log('[AD DEBUG] Access token failed for ' + playerType + ': ' + (err as Error).message);
+                    recordTokenFetchFailure(streamInfo, brk, playerType);
+                }
+            }
+            if (encodingsM3u8) {
+                try {
+                    const variant = getStreamVariantForResolution(encodingsM3u8, currentResolution);
+                    const streamM3u8Url = variant?.url;
+                    if (!variant || !streamM3u8Url) {
+                        // Previously fetch(null), which threw on the blob-relative URL; same catch below, clearer message.
+                        throw new Error('no variant playlist in the backup encodings');
+                    }
+                    const streamM3u8Response = await realFetch(streamM3u8Url);
+                    if (streamM3u8Response.status === 200) {
+                        const m3u8Text = await streamM3u8Response.text();
+                        if (m3u8Text) {
+                            if (playerType === state.FallbackPlayerType) {
+                                fallbackM3u8 = m3u8Text;
+                                fallbackCodecs = variant.codecs;
+                            }
+                            const backupHasAds = hasAdTags(m3u8Text);
+                            if (
+                                (!backupHasAds &&
+                                    (state.SimulatedAdsDepth === 0 ||
+                                        playerTypeIndex >= state.SimulatedAdsDepth - 1)) ||
+                                (!fallbackM3u8 && playerTypeIndex >= playerTypesToTry.length - 1)
+                            ) {
+                                if (brk.ConsecutiveAllStrippedPolls >= 1 && !backupHasAds) {
+                                    const prevType = brk.LastCommittedBackupPlayerType;
+                                    if (prevType && prevType !== playerType) {
+                                        console.log(
+                                            '[AD DEBUG] Cycle switched to different clean type (' +
+                                                playerType +
+                                                ', was ' +
+                                                prevType +
+                                                ') during freeze — recovered without reload',
+                                        );
+                                        // Only mark as cycle-rescued when we ACTUALLY switched player types.
+                                        // Natural recovery (same type became clean) still needs the end-of-break
+                                        // reload to refresh the player buffer — skipping it leaves the player
+                                        // stuck with low buffer and the buffer monitor unable to recover.
+                                        brk.CycleRescued = true;
+                                    } else {
+                                        console.log(
+                                            '[AD DEBUG] Same backup type (' +
+                                                playerType +
+                                                ') became clean during freeze — natural recovery',
+                                        );
+                                    }
+                                }
+                                backupPlayerType = playerType;
+                                backupM3u8 = m3u8Text;
+                                backupCodecs = variant.codecs;
+                                break;
+                            }
+                            if (backupHasAds) {
+                                if (!brk.ContaminatedTypes.has(playerType)) {
+                                    brk.ContaminatedTypes.add(playerType);
+                                    console.log('[AD DEBUG] Backup stream (' + playerType + ') also has ads');
+                                }
+                            }
+                            if (isDoingMinimalRequests) {
+                                backupPlayerType = playerType;
+                                backupM3u8 = m3u8Text;
+                                backupCodecs = variant.codecs;
+                                break;
+                            }
+                            // Cycle through all player types looking for a clean backup. Only commit
+                            // an ad-laden backup as a last resort when we've exhausted all options.
+                            // PR #89 previously committed the first ad-laden type immediately — that
+                            // caused the v58 freeze regression (issue #112) because the strip+recovery
+                            // loop would engage even when a clean alternate was available on another
+                            // player type.
+                            if (backupHasAds && playerTypeIndex >= playerTypesToTry.length - 1) {
+                                console.log(
+                                    '[AD DEBUG] All backup player types ad-laden — taking ' +
+                                        playerType +
+                                        ' as last-resort fallback (strip+recovery path will engage)',
+                                );
+                                backupPlayerType = playerType;
+                                backupM3u8 = m3u8Text;
+                                backupCodecs = variant.codecs;
+                                break;
+                            }
+                        }
+                    } else {
+                        console.log(
+                            '[AD DEBUG] Backup stream fetch failed for ' +
+                                playerType +
+                                ' (status ' +
+                                streamM3u8Response.status +
+                                ')',
+                        );
+                    }
+                } catch (err) {
+                    console.log('[AD DEBUG] Backup stream error for ' + playerType + ': ' + (err as Error).message);
+                }
+            }
+            streamInfo.BackupEncodingsM3U8Cache[playerType] = null;
+            if (isFreshM3u8) {
+                break;
+            }
+        }
+    }
+    if (!backupM3u8 && fallbackM3u8) {
+        // Don't fall back to a type already marked contaminated this break: we'd silently
+        // re-commit the same ad-laden playlist on every poll. Better to leave backupM3u8 null
+        // and let the "No ad-free backup stream found" log fire so it's visible.
+        if (brk.ContaminatedTypes.has(state.FallbackPlayerType)) {
+            console.log(
+                '[AD DEBUG] Skipping fallback to ' +
+                    state.FallbackPlayerType +
+                    ' — marked contaminated this break (' +
+                    [...brk.ContaminatedTypes].join(', ') +
+                    ' all ad-laden)',
+            );
+        } else {
+            backupPlayerType = state.FallbackPlayerType;
+            backupM3u8 = fallbackM3u8;
+            backupCodecs = fallbackCodecs;
+        }
+    }
+    if (backupM3u8 && backupPlayerType) {
+        return {
+            playerType: backupPlayerType,
+            m3u8: backupM3u8,
+            searchStartedAt: backupSearchStart,
+            coldTokenFetches: backupColdTokenFetches,
+            codecs: backupCodecs,
+        };
+    }
+    console.log(
+        '[AD DEBUG] No ad-free backup stream found — ads may leak. Tried: ' +
+            playerTypesToTry.slice(startIndex).join(', '),
+    );
+    return null;
+}
+
+// Serve a backup for this poll, and on a switch of player type update pinning and the
+// autoplay-first bookkeeping.
+function commitBackup(
+    streamInfo: StreamInfo,
+    brk: AdBreak,
+    backupPlayerType: PlayerType,
+    searchStartedAt: number,
+    coldTokenFetches: number,
+): void {
+    brk.LastCommittedBackupPlayerType = backupPlayerType;
+    if (brk.ActiveBackupPlayerType === backupPlayerType) {
         return;
     }
-    streamInfo.EarlyReloadTriggered = true;
-    streamInfo.EarlyReloadAwaitingResult = true;
-    streamInfo.EarlyReloadCount++;
-    streamInfo.EarlyReloadAtPoll = streamInfo.TotalAllStrippedPolls || streamInfo.ConsecutiveAllStrippedPolls;
-    const reason = recoveryThin ? ' (thin recovery cache: ' + recoverySize + ' segments)' : '';
+    brk.ActiveBackupPlayerType = backupPlayerType;
+    // Never pin 'autoplay': PreferLowQualityBackup keeps it LAST so the last-resort branch can
+    // commit it when every Source type is ad-laden. Pinned to the front, the last-resort branch
+    // would commit a different ad-laden Source type instead (strip + recovery, freezes likely).
+    if (state.PinBackupPlayerType && backupPlayerType !== 'autoplay') {
+        streamInfo.PinnedBackupPlayerType = backupPlayerType;
+    }
     console.log(
-        '[AD DEBUG] Early reload triggered' +
-            pathLabel +
-            ' — ' +
-            streamInfo.ConsecutiveAllStrippedPolls +
-            ' consecutive all-stripped polls' +
-            reason +
-            ' [' +
-            streamInfo.EarlyReloadCount +
-            '/' +
-            maxEarlyReloads +
-            ']',
+        `[AD DEBUG] Blocking${brk.IsMidroll ? ' midroll ' : ' '}ads (${backupPlayerType}) — backup found in ${Date.now() - searchStartedAt}ms${coldTokenFetches > 0 ? ` (cold cache: ${coldTokenFetches} token fetch${coldTokenFetches > 1 ? 'es' : ''})` : ' (warm cache)'}`,
     );
-    postToPage({ key: 'ReloadPlayer', kind: 'early' });
+    if (brk.Path === 'escaped') {
+        const qualityTier = backupPlayerType === 'autoplay' ? '360p' : 'Source';
+        console.log(
+            '[AD DEBUG] Post-escape backup: ' +
+                backupPlayerType +
+                ' (' +
+                qualityTier +
+                ') — recovered from sticky-path freeze',
+        );
+    } else if (backupPlayerType === 'autoplay' && state.PreferLowQualityBackup) {
+        const sourceTried = brk.ContaminatedTypes.size;
+        if (sourceTried === 0) {
+            console.log('[AD DEBUG] Autoplay backup committed — 360p first-try (PreferLowQualityBackup)');
+            streamInfo.FastAutoplayWins++;
+        } else {
+            console.log(
+                '[AD DEBUG] Autoplay backup committed — 360p fallback after ' +
+                    sourceTried +
+                    ' Source type(s) ad-laden (PreferLowQualityBackup)',
+            );
+        }
+        // Only a full probe (all 4 Source types ad-laden) marks the Source tier exhausted.
+        if (state.FastAutoplayFirstTry && sourceTried >= 4) {
+            streamInfo.SourceTierExhausted = true;
+            streamInfo.FastAutoplayWins = 0;
+        }
+    } else if (state.FastAutoplayFirstTry && backupPlayerType !== 'autoplay') {
+        // A Source-tier type committed: the channel recovered, back to normal ordering.
+        streamInfo.SourceTierExhausted = false;
+        streamInfo.FastAutoplayWins = 0;
+    }
+}
+
+// An ad-free poll during a break: maybe end the break.
+function handleAdFreePoll(streamInfo: StreamInfo, brk: AdBreak, textStr: string): void {
+    const reason = onAdFreePoll(brk, textStr.includes(',live'));
+    if (!reason) {
+        return;
+    }
+    if (reason === 'max-wait' && brk.End) {
+        console.log(
+            '[AD DEBUG] Slow-path ad-end escalation — ' +
+                brk.End.bounces +
+                ' marker bounces, ' +
+                ((Date.now() - brk.End.since) / 1000).toFixed(1) +
+                's since first clean poll',
+        );
+    } else if (reason === 'no-live-segments') {
+        console.log('[AD DEBUG] Backup stream has no live segments — forcing immediate reload');
+    }
+    endBreak(streamInfo, brk);
+}
+
+function endBreak(streamInfo: StreamInfo, brk: AdBreak): void {
+    console.log(
+        '[AD DEBUG] Finished blocking ads — stripped ' +
+            brk.StrippedSegments +
+            ' ad segments, duration: ' +
+            ((Date.now() - brk.StartedAt) / 1000).toFixed(1) +
+            's',
+    );
+    if (brk.TotalAllStrippedPolls > 0) {
+        const reloadInfo = brk.EarlyReloadAtPoll ? ', early reload at poll ' + brk.EarlyReloadAtPoll : '';
+        const wallClockFreeze = brk.FreezeStartedAt
+            ? ((Date.now() - brk.FreezeStartedAt) / 1000).toFixed(1) + 's wall-clock'
+            : 'unknown';
+        console.log(
+            '[AD DEBUG] Ad break stats: ' +
+                brk.TotalAllStrippedPolls +
+                ' all-stripped polls, freeze duration: ' +
+                wallClockFreeze +
+                reloadInfo,
+        );
+    }
+    const hadStrippedSegments = brk.StrippedSegments > 0;
+    // Only count toward the false-positive guard if the m3u8 lacked high-confidence ad markers.
+    // Confirmed ads that produce 0 strips are real ads avoided via a clean backup.
+    if (!hadStrippedSegments && !brk.HasConfirmedAdAttrs) {
+        streamInfo.ConsecutiveZeroStripBreaks++;
+        if (streamInfo.ConsecutiveZeroStripBreaks >= 3) {
+            console.log(
+                '[AD DEBUG] Warning: ' +
+                    streamInfo.ConsecutiveZeroStripBreaks +
+                    ' consecutive unconfirmed ad breaks with 0 segments stripped — possible false positive from ad signifiers',
+            );
+        }
+    } else {
+        streamInfo.ConsecutiveZeroStripBreaks = 0;
+    }
+    const action = decideBreakEndAction(streamInfo, brk, state);
+    streamInfo.Break = null;
+    streamInfo.CodecSwap = 'native';
+    if (!hadStrippedSegments) {
+        console.log('[AD DEBUG] CSAI-only ad break (stripped 0) — no MediaSource flush needed');
+    }
+    if (action.action === 'reload') {
+        console.log('[AD DEBUG] End-of-break reload: ' + action.reason);
+        streamInfo.LastPlayerReload = Date.now();
+        requestReload(action.kind);
+    } else if (action.action === 'pause-play') {
+        if (hadStrippedSegments && state.ReloadPlayerAfterAd) {
+            console.log('[AD DEBUG] Cycle rescue handled the break cleanly — skipping end-of-break reload');
+        }
+        postToPage({ key: 'PauseResumePlayer' });
+    }
+}
+
+// `activeBackupPlayerType` overrides the break's (the CSAI fast paths report none).
+function postBanner(streamInfo: StreamInfo, activeBackupPlayerType?: PlayerType | null): void {
+    const brk = streamInfo.Break;
+    postToPage({
+        key: 'UpdateAdBlockBanner',
+        isMidroll: brk ? brk.IsMidroll : false,
+        hasAds: !!brk,
+        isStrippingAdSegments: brk ? brk.IsStripping : false,
+        numStrippedAdSegments: brk ? brk.StrippedSegments : 0,
+        activeBackupPlayerType:
+            activeBackupPlayerType === undefined ? (brk?.ActiveBackupPlayerType ?? null) : activeBackupPlayerType,
+    });
 }
 
 // Bookkeeping shared by every way a backup access-token fetch can fail: lock the player type
 // out briefly and log once per streak of consecutive failures.
-function recordTokenFetchFailure(streamInfo: StreamInfo, playerType: PlayerType): void {
-    streamInfo.FailedBackupPlayerTypes.set(playerType, Date.now());
+function recordTokenFetchFailure(streamInfo: StreamInfo, brk: AdBreak, playerType: PlayerType): void {
+    brk.FailedBackupPlayerTypes.set(playerType, Date.now());
     streamInfo.ConsecutiveTokenFetchFailures++;
     if (streamInfo.ConsecutiveTokenFetchFailures >= 3 && !streamInfo.LoggedTokenFailureStreak) {
         streamInfo.LoggedTokenFailureStreak = true;

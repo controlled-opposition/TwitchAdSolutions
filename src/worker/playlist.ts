@@ -72,22 +72,30 @@ export function resolutionArea(resolution: string): number {
     const [width, height] = resolution.split('x').map(Number);
     return width * height;
 }
-export function getStreamUrlForResolution(
+/** A variant playlist from a master (encodings) playlist. */
+export interface StreamVariant {
+    url: string;
+    codecs: string;
+}
+
+/**
+ * The variant of `encodingsM3u8` closest to `resolutionInfo`: same resolution (and frame rate
+ * when possible), else the closest pixel area. When `resolutionInfo.Codecs` is given, variants of
+ * the same video codec family are preferred (any resolution) over other families: a backup in
+ * another codec can't be fed into the player's MediaSource.
+ */
+export function getStreamVariantForResolution(
     encodingsM3u8: string,
-    resolutionInfo: Pick<ResolutionInfo, 'Resolution' | 'FrameRate'>,
-): string | null {
+    resolutionInfo: Pick<ResolutionInfo, 'Resolution' | 'FrameRate'> & { Codecs?: string },
+): StreamVariant | null {
     const encodingsLines = encodingsM3u8.split(/\r?\n/);
-    const targetArea = resolutionArea(resolutionInfo.Resolution);
-    let matchedResolutionUrl = null;
-    let matchedFrameRate = false;
-    let closestResolutionUrl = null;
-    let closestResolutionDifference = Infinity;
+    const variants: { url: string; resolution: string; frameRate: unknown; codecs: string }[] = [];
     for (let i = 0; i < encodingsLines.length - 1; i++) {
         // Accept v2 API variant URLs which are raw CDN URLs without '.m3u8' in the path.
         // v1 API: next line is '...index-<resolution>.m3u8?...'
         // v2 API: next line is a raw CDN URL like 'https://video-edge-...net/v1/.../chunked/...'
         // without '.m3u8'. Matching only on '.m3u8' would skip v2 variants entirely,
-        // causing getStreamUrlForResolution to return null and backup selection to fail.
+        // causing backup selection to fail.
         const nextLine = encodingsLines[i + 1]?.trim();
         if (
             encodingsLines[i].startsWith('#EXT-X-STREAM-INF') &&
@@ -96,26 +104,60 @@ export function getStreamUrlForResolution(
             (nextLine.includes('.m3u8') || nextLine.includes('://'))
         ) {
             const attributes = parseAttributes(encodingsLines[i]);
-            const resolution = attributes['RESOLUTION'];
-            const frameRate = attributes['FRAME-RATE'];
-            if (resolution) {
-                if (
-                    resolution === resolutionInfo.Resolution &&
-                    (!matchedResolutionUrl || (!matchedFrameRate && frameRate === resolutionInfo.FrameRate))
-                ) {
-                    matchedResolutionUrl = encodingsLines[i + 1];
-                    matchedFrameRate = frameRate === resolutionInfo.FrameRate;
-                    if (matchedFrameRate) {
-                        return matchedResolutionUrl;
-                    }
-                }
-                const difference = Math.abs(resolutionArea(resolution) - targetArea);
-                if (difference < closestResolutionDifference) {
-                    closestResolutionUrl = encodingsLines[i + 1];
-                    closestResolutionDifference = difference;
-                }
+            if (attributes['RESOLUTION']) {
+                variants.push({
+                    url: encodingsLines[i + 1],
+                    resolution: attributes['RESOLUTION'],
+                    frameRate: attributes['FRAME-RATE'],
+                    codecs: attributes['CODECS'] || '',
+                });
             }
         }
     }
-    return closestResolutionUrl;
+    const family = videoCodecFamily(resolutionInfo.Codecs);
+    const sameFamily = family === 'unknown' ? [] : variants.filter((v) => videoCodecFamily(v.codecs) === family);
+    const candidates = sameFamily.length > 0 ? sameFamily : variants;
+    const targetArea = resolutionArea(resolutionInfo.Resolution);
+    let matched = null;
+    let matchedFrameRate = false;
+    let closest = null;
+    let closestDifference = Infinity;
+    for (const v of candidates) {
+        if (
+            v.resolution === resolutionInfo.Resolution &&
+            (!matched || (!matchedFrameRate && v.frameRate === resolutionInfo.FrameRate))
+        ) {
+            matched = v;
+            matchedFrameRate = v.frameRate === resolutionInfo.FrameRate;
+            if (matchedFrameRate) {
+                return { url: v.url, codecs: v.codecs };
+            }
+        }
+        const difference = Math.abs(resolutionArea(v.resolution) - targetArea);
+        if (difference < closestDifference) {
+            closest = v;
+            closestDifference = difference;
+        }
+    }
+    return closest ? { url: closest.url, codecs: closest.codecs } : null;
+}
+
+/** URL of the variant getStreamVariantForResolution picks. */
+export function getStreamUrlForResolution(
+    encodingsM3u8: string,
+    resolutionInfo: Pick<ResolutionInfo, 'Resolution' | 'FrameRate'> & { Codecs?: string },
+): string | null {
+    return getStreamVariantForResolution(encodingsM3u8, resolutionInfo)?.url ?? null;
+}
+
+/**
+ * Whether a backup variant in `backupCodecs` can't be fed to a player decoding `playerCodecs`.
+ * A player on an enhanced codec (HEVC/AV1) needs that same family (an unknown one counts as a
+ * mismatch, as the AVC swap is the norm); an AVC/unknown player only mismatches an enhanced backup.
+ */
+export function isCodecMismatch(playerCodecs: string, backupCodecs: string): boolean {
+    if (isEnhancedCodec(playerCodecs)) {
+        return videoCodecFamily(backupCodecs) !== videoCodecFamily(playerCodecs);
+    }
+    return isEnhancedCodec(backupCodecs);
 }

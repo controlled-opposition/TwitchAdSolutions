@@ -1,4 +1,4 @@
-import type { StreamInfo } from '../shared/types.ts';
+import type { AdBreak, StreamInfo } from '../shared/types.ts';
 import { state } from './state.ts';
 
 export function hasAdTags(textStr: string): boolean {
@@ -19,22 +19,29 @@ function isKnownAdUrl(url: string): boolean {
 function isLowLatencyHint(line: string): boolean {
     return line.startsWith('#EXT-X-TWITCH-PREFETCH:') || line.startsWith('#EXT-X-PRELOAD-HINT:');
 }
-export function stripAdSegments(textStr: string, stripAllSegments: boolean, streamInfo: StreamInfo): string {
+// Called on every ad-marked poll of a break. Updates the break's strip and freeze state (`brk`);
+// `streamInfo` supplies the clean-playlist snapshot and the cache-prune throttle.
+export function stripAdSegments(
+    textStr: string,
+    stripAllSegments: boolean,
+    streamInfo: StreamInfo,
+    brk: AdBreak,
+): string {
     let hasStrippedAdSegments = false;
     let inCueOut = false;
     const liveSegments = [];
     const lines = textStr.split(/\r?\n/);
     const newAdUrl = 'https://twitch.tv';
-    // Log ad tracking attribute names once per stream (helps identify new beacons)
-    if (!streamInfo.HasLoggedAdAttributes) {
+    // Log ad tracking attribute names once per break (helps identify new beacons)
+    if (!brk.LoggedAdAttributes) {
         const adAttrs = textStr.match(/X-TV-TWITCH-AD[A-Z-]*(?==")/g);
         if (adAttrs && adAttrs.length > 0) {
-            streamInfo.HasLoggedAdAttributes = true;
+            brk.LoggedAdAttributes = true;
             console.log('[AD DEBUG] Ad tracking attributes seen: ' + [...new Set(adAttrs)].join(', '));
         }
     }
     // Log potential ad markers that aren't in AdSignifiers (candidates for future inclusion)
-    if (!streamInfo.HasLoggedUnknownSignifiers) {
+    if (!brk.LoggedUnknownSignifiers) {
         const candidates = new Set<string>();
         for (const sm of textStr.matchAll(/EXT-X-DATERANGE:[^\n]*CLASS="(twitch-[^"]+)"/g)) {
             candidates.add('EXT-X-DATERANGE:CLASS="' + sm[1] + '"');
@@ -51,7 +58,7 @@ export function stripAdSegments(textStr: string, stripAllSegments: boolean, stre
                 !state.KnownNonAdSignifiers.some((s) => s && c.includes(s)),
         );
         if (unknown.length > 0) {
-            streamInfo.HasLoggedUnknownSignifiers = true;
+            brk.LoggedUnknownSignifiers = true;
             console.log(
                 '[AD DEBUG] Potential ad markers seen but not in AdSignifiers: ' +
                     unknown.join(', ') +
@@ -83,7 +90,7 @@ export function stripAdSegments(textStr: string, stripAllSegments: boolean, stre
             const isLiveSegment = line.includes(',live');
             if (!isLiveSegment || stripAllSegments || state.AllSegmentsAreAdSegments || inCueOut) {
                 if (!state.AdSegmentCache.has(segmentUrl)) {
-                    streamInfo.NumStrippedAdSegments++;
+                    brk.StrippedSegments++;
                 }
                 state.AdSegmentCache.set(segmentUrl, Date.now());
                 hasStrippedAdSegments = true;
@@ -91,7 +98,7 @@ export function stripAdSegments(textStr: string, stripAllSegments: boolean, stre
                 console.log('[AD DEBUG] Ad segment detected via URL pattern: ' + segmentUrl);
                 state.AdSegmentCache.set(segmentUrl, Date.now());
                 hasStrippedAdSegments = true;
-                streamInfo.NumStrippedAdSegments++;
+                brk.StrippedSegments++;
             } else {
                 liveSegments.push({ extinf: line, url: segmentUrl });
             }
@@ -145,16 +152,16 @@ export function stripAdSegments(textStr: string, stripAllSegments: boolean, stre
                 lines[i] = '';
             }
         }
-    } else {
-        streamInfo.NumStrippedAdSegments = 0;
     }
+    // brk.StrippedSegments is not reset on a poll that strips nothing: it is the break's total,
+    // which decides whether the end-of-break reload has to flush the MediaSource.
     // Cache live segments for recovery (plus the MEDIA-SEQUENCE of the oldest cached segment,
     // so the player accepts injected recovery segments as the correct position in the stream)
     if (liveSegments.length > 0) {
-        streamInfo.RecoverySegments = liveSegments.slice(-6);
+        brk.RecoverySegments = liveSegments.slice(-6);
         const seq = parseInt((textStr.match(/#EXT-X-MEDIA-SEQUENCE:(\d+)/) || [])[1], 10);
         if (!Number.isNaN(seq)) {
-            streamInfo.RecoveryStartSeq = seq + Math.max(0, liveSegments.length - streamInfo.RecoverySegments.length);
+            brk.RecoveryStartSeq = seq + Math.max(0, liveSegments.length - brk.RecoverySegments.length);
         }
     }
     // If all segments were stripped, try to prevent black screen via recovery content.
@@ -163,9 +170,9 @@ export function stripAdSegments(textStr: string, stripAllSegments: boolean, stre
     // content vs the thin per-segment recovery cache. Falls back to the per-segment
     // cache if the snapshot is stale or missing.
     if (hasStrippedAdSegments && liveSegments.length === 0) {
-        streamInfo.ConsecutiveAllStrippedPolls = (streamInfo.ConsecutiveAllStrippedPolls || 0) + 1;
-        streamInfo.TotalAllStrippedPolls = (streamInfo.TotalAllStrippedPolls || 0) + 1;
-        if (!streamInfo.FreezeStartedAt) streamInfo.FreezeStartedAt = Date.now();
+        brk.ConsecutiveAllStrippedPolls++;
+        brk.TotalAllStrippedPolls++;
+        if (!brk.FreezeStartedAt) brk.FreezeStartedAt = Date.now();
         // Primary: fresh full-playlist snapshot (< 1.5s old, must not itself contain ad markers)
         const snapshotAge = streamInfo.LastCleanNativePlaylistAt
             ? Date.now() - streamInfo.LastCleanNativePlaylistAt
@@ -184,34 +191,32 @@ export function stripAdSegments(textStr: string, stripAllSegments: boolean, stre
             console.log(
                 '[AD DEBUG] All segments stripped — reusing last clean native playlist (' + snapshotAge + 'ms old)',
             );
-            streamInfo.IsStrippingAdSegments = hasStrippedAdSegments;
+            brk.IsStripping = hasStrippedAdSegments;
             return streamInfo.LastCleanNativeM3U8;
         }
-        // Fallback: per-segment recovery cache (existing behavior)
-        if (streamInfo.RecoverySegments && streamInfo.RecoverySegments.length > 0) {
+        // Fallback: per-segment recovery cache, built from this break's polls
+        if (brk.RecoverySegments.length > 0) {
             console.log(
-                '[AD DEBUG] All segments stripped — restoring ' +
-                    streamInfo.RecoverySegments.length +
-                    ' recovery segments',
+                '[AD DEBUG] All segments stripped — restoring ' + brk.RecoverySegments.length + ' recovery segments',
             );
-            if (streamInfo.RecoveryStartSeq !== undefined) {
+            if (brk.RecoveryStartSeq !== undefined) {
                 for (let j = 0; j < lines.length; j++) {
                     if (lines[j].startsWith('#EXT-X-MEDIA-SEQUENCE:')) {
-                        lines[j] = '#EXT-X-MEDIA-SEQUENCE:' + streamInfo.RecoveryStartSeq;
+                        lines[j] = '#EXT-X-MEDIA-SEQUENCE:' + brk.RecoveryStartSeq;
                         break;
                     }
                 }
             }
-            for (let j = 0; j < streamInfo.RecoverySegments.length; j++) {
-                lines.push(streamInfo.RecoverySegments[j].extinf);
-                lines.push(streamInfo.RecoverySegments[j].url);
+            for (let j = 0; j < brk.RecoverySegments.length; j++) {
+                lines.push(brk.RecoverySegments[j].extinf);
+                lines.push(brk.RecoverySegments[j].url);
             }
         }
     } else if (liveSegments.length > 0) {
         // Reset freeze counter when live segments are available
-        streamInfo.ConsecutiveAllStrippedPolls = 0;
+        brk.ConsecutiveAllStrippedPolls = 0;
     }
-    streamInfo.IsStrippingAdSegments = hasStrippedAdSegments;
+    brk.IsStripping = hasStrippedAdSegments;
     const now = Date.now();
     // Throttle cache prune to once per 60s. The 120s TTL gives plenty of headroom
     // and scanning the full cache on every m3u8 poll adds up during heavy ad break

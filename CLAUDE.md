@@ -58,16 +58,38 @@ All read at init (`loadLocalStorageConfig()` in `src/page/storage.ts`); the ones
 
 - **Buffer monitor** (`monitorPlayerBuffering`) — polls player state every 1-3s (visibility-aware). Detects stalls, fires pause/play or reload.
 - **No end-of-break reload cooldown** — the post-ad reload is rate-limited by the break cycle itself (#162). The former `reloadCooldownSeconds` setting only fed a log line and was removed in v69.2.0.
-- **Reload cap** — buffer monitor reloads at most once per recovery window (`recoveryReloadUsed`).
+- **Reload cap** — buffer monitor reloads at most once per recovery window (`StallLadder.reloadUsed`, `src/page/stall.ts`).
 - **Grace periods** — 15s after reload, 10s after backup switch. Buffer monitor skips fixes during these.
 - **Drift correction** — `startDriftCorrection(videoElement)` shared function. 1.1× playback rate, 30s safety timeout. Restarts fresh on re-entry (clears stale timers). Used by post-reload drift and buffer gap seek.
-- **Reload routing** — worker → main `ReloadPlayer` messages carry a `kind` field. `doTwitchPlayerTask('reload', reloadKind)` picks `setSrc` params: `kind === 'early'` → hard reload (`isNewMediaPlayerInstance: true, refreshAccessToken: true`, new session); otherwise soft reload. The two flags are **not** coupled: on Apple touch devices `iosSoftReload` downgrades `isNewMediaPlayerInstance` to false while `refreshAccessToken` stays true (v68.5.5 — not yet validated on a device). Early reload sites (both sticky + normal paths) send `kind: 'early'`; the end-of-break reload after a break that stripped segments sends `'early'`; after a no-strip break that committed a backup (BackupSwapFirst swap, issue #129 mode D) it sends `'post-ad'` when `SoftReloadNoStrip` is on, except for an autoplay backup, which stays `'early'` because only a token refresh leaves the 360p ladder. (`SoftReloadNoStrip` was dead code from v68.5.0 until v69.2.0: it sat in the stripped-segments branch.) HEVC force reload stays soft (codec change, no strip involved). Hard reload flushes the MediaSource buffer — required after strip activity (BLANK_MP4 injection, recovery replay) to avoid audio/video desync from accumulated timestamp drift.
-- **Early reload** — fires during prolonged all-stripped freeze. Threshold: 3 polls (~6s), or 1 poll when recovery cache <3 segments (thin-cache fast path). Budget: `max(1, PodLength)` or `max(2, PodLength)` when thin. `EarlyReloadTriggered` resets on "still ads" (both sticky + normal paths) to allow budget-based re-fire. Override via `twitchAdSolutions_earlyReloadPollThreshold`.
-- **Sticky CSAI fast path** — once a break enters CSAI fast path (all segments live), stays on it for the whole break. Has its own early-reload trigger + `EarlyReloadAwaitingResult` check (normal-path check unreachable due to early return).
+- **Reload routing** — worker → main `ReloadPlayer` messages carry a `kind` field, and a `requestId` when the worker wants to know what happened (`requestReload()` in `src/worker/reload.ts`): the page answers with `ReloadResult` (`reloaded` / `skipped-healthy` / `not-done`), so only the request that was skipped is affected. `kind: 'codec-swap'` (HEVC/AV1 → AVC master) is a soft reload that is never skipped as "player healthy". `doTwitchPlayerTask('reload', reloadKind)` picks `setSrc` params: `kind === 'early'` → hard reload (`isNewMediaPlayerInstance: true, refreshAccessToken: true`, new session); otherwise soft reload. The two flags are **not** coupled: on Apple touch devices `iosSoftReload` downgrades `isNewMediaPlayerInstance` to false while `refreshAccessToken` stays true (v68.5.5 — not yet validated on a device). Early reload sites (both sticky + normal paths) send `kind: 'early'`; the end-of-break reload after a break that stripped segments sends `'early'`; after a no-strip break that committed a backup (BackupSwapFirst swap, issue #129 mode D) it sends `'post-ad'` when `SoftReloadNoStrip` is on, except for an autoplay backup, which stays `'early'` because only a token refresh leaves the 360p ladder. (`SoftReloadNoStrip` was dead code from v68.5.0 until v69.2.0: it sat in the stripped-segments branch.) HEVC force reload stays soft (codec change, no strip involved). Hard reload flushes the MediaSource buffer — required after strip activity (BLANK_MP4 injection, recovery replay) to avoid audio/video desync from accumulated timestamp drift.
+- **Early reload** — fires during prolonged all-stripped freeze. Threshold: 3 polls (~6s), or 1 poll when recovery cache <3 segments (thin-cache fast path). Budget: `max(1, PodLength)` or `max(2, PodLength)` when thin. State machine `AdBreak.EarlyReload` (`src/worker/early-reload.ts`): `armed → requested → reloaded → armed`; any result re-arms (budget-bounded); a reload the page skipped as healthy is refunded; an unanswered request re-arms after 10s. Not fired on the poll that starts a codec-swap reload. Override via `twitchAdSolutions_earlyReloadPollThreshold`.
+- **Sticky CSAI fast path** — `AdBreak.Path`: `probing → sticky-csai` once a break's polls are all live (only when `BackupSwapFirst` is off), then stays for the whole break unless the PreferLowQualityBackup escape hatch moves it to `escaped` (never back). Both paths step the same early-reload machine.
 - **Latency-aware reload health check** — measures `seekable.end - currentTime` before skipping post-ad reload. If >7s behind live or seekable unavailable/garbage, proceeds with reload. Guards against 2^30 sentinel values via `Number.isFinite` + 3600s cap.
 - **User pause intent** — tracks video pause/play events to distinguish user vs script pauses. `weJustPaused` only resets when player wasn't paused (guards against clearing intent during stall recovery).
 - **Stale player ref** — `playerForMonitoringBuffering = null` on reload to force re-acquisition.
-- **StreamInfo factory** — `createStreamInfo()` (`src/worker/stream-info.ts`) declares all fields up-front (50 fields).
+- **StreamInfo factory** — `createStreamInfo()` (`src/worker/stream-info.ts`) declares all fields up-front. Per-break state lives in `AdBreak` (`createAdBreak()`, `src/worker/ad-break.ts`), created on the first ad-marked poll and dropped at break end, so there is no per-break reset list to maintain.
+
+## State Machines
+
+Each one is a single typed state value with its transitions in one place; keep it that way (no new loose flags that together encode a state).
+
+Worker (per `StreamInfo`):
+- **Ad break** — `StreamInfo.Break: AdBreak | null` (`src/worker/ad-break.ts`). `onAdPoll` / `onAdFreePoll` drive the end candidate (`AdBreak.End`): 3 ad-free polls in a row, an ad-free poll with no live segments, or 12s since the first ad-free poll end the break (bounces back to ad-marked keep a <12s candidate). `decideBreakEndAction()` picks the end-of-break player action. `StrippedSegments` is the break's total (not reset on a poll that strips nothing).
+- **Break path** — `AdBreak.Path` (`probing` / `sticky-csai` / `escaped`).
+- **Early reload** — `AdBreak.EarlyReload` (see above).
+- **Codec swap** — `StreamInfo.CodecSwap`: `native → switching → swapped → native`. The AVC-only master is served unless `native`. Tried once per break; reverts to `native` if the page didn't reload. Every break end with a swap reloads back, stripped or not.
+- **Autoplay first** — `SourceTierExhausted` + `FastAutoplayWins` across breaks; `AdBreak.AutoplayFirst` is decided once per break on its first backup search (every 5th such break re-probes the Source tier).
+- **Recovery segments** — `AdBreak.RecoverySegments`, so a break never replays a previous break's segments.
+- **Page reload seen** — `StreamInfo.ReloadPending`: set on every stream by `TriggeredPlayerReload`; each stream's own next poll stamps `LastPlayerReload` (minimal-requests window, post-ad re-entry guards).
+- **Codec match** — backup variants are picked in the player's codec family when one exists (`getStreamVariantForResolution`); if the committed backup's family still can't be decoded by the player (`isCodecMismatch`, either direction), the poll strips every segment.
+
+Page:
+- **Stall ladder** — `playerBufferState.stall` (`src/page/stall.ts`, pure `stallTick`).
+- **Post-break wedge watch** — `playerBufferState.wedge` (`src/page/wedge.ts`, pure `wedgeSample`), armed on the ad→no-ad edge.
+- **Loading-circle detector** — `playerBufferState.adStall` (`idle` / `stalling`); `hasHadData` resets on channel change.
+- **Ad-break mirror** — `inAdBreak` + `runtime.isActivelyStrippingAds`, applied only in `onAdBreakUpdate()` (`src/page/worker-hook.ts`).
+- **Drift correction** — one tracked catch-up (`src/page/drift.ts`); finishing resets the element whose rate was raised.
+- **Hard-reload mute restore** — one `MuteRestore` at a time (`src/page/player.ts`); a hard reload during a pending restore takes over its pre-mute instead of reading it as a user mute.
 
 ## Debug Logging
 
@@ -100,7 +122,7 @@ Use the dev shell's esbuild: the up-to-date check compares bytes, so a different
 
 TypeScript 7 (`tsconfig.base.json`, extended by `tsconfig.json` for the page + shared code with the DOM lib, and `src/worker/tsconfig.json` for the worker with the webworker lib). `strict` is on; tsc only checks, esbuild builds.
 - Imports use explicit `.ts` extensions and `import type` for types (`verbatimModuleSyntax`, `erasableSyntaxOnly`).
-- `StreamInfo` is built by `createStreamInfo()` with every field up front (50 fields); a field missing from it or from the interface is a type error.
+- `StreamInfo` is built by `createStreamInfo()` and `AdBreak` by `createAdBreak()`, each with every field up front; a field missing from one or from its interface is a type error.
 - Twitch internals reached through React (`TwitchMediaPlayer`, `TwitchPlayerState`, `ReactFiber` in `src/page/twitch.ts`) are typed with only the members vaft uses, all optional where Twitch may drop them; component instances are deliberately `any` (`ReactInstance`).
 - Behaviour-neutral casts where the checker can't follow the code: `(err as Error).message` in catch blocks, `arguments as any` when forwarding to the real `fetch`/`setItem`/`open`. Don't "fix" these by changing runtime behaviour.
 

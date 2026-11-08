@@ -10,6 +10,7 @@ import { hookWorkerFetch } from './fetch-hook.ts';
 import { pendingFetchRequests } from './gql.ts';
 import { state } from './state.ts';
 import { pruneStreamInfos } from './stream-info.ts';
+import { settleReload } from './reload.ts';
 
 declare const __vaftInit: WorkerInit;
 
@@ -71,29 +72,12 @@ self.addEventListener('message', function (e: MessageEvent<PageToWorkerMessage>)
             }
         }
     } else if (e.data.key === 'TriggeredPlayerReload') {
-        state.HasTriggeredPlayerReload = true;
-    } else if (e.data.key === 'ReloadSkipped') {
-        // Main thread refused the reload (player healthy) — clear the
-        // early-reload flags so we can re-fire if the player later stalls.
-        // Without this clear, the worker's EarlyReloadTriggered /
-        // EarlyReloadAwaitingResult flags stay set after a healthy-skip,
-        // blocking subsequent early-reload firings in the same break even
-        // if a later poll legitimately calls for one.
-        let cleared = false;
+        // The page reloaded its player. Each stream stamps LastPlayerReload on its own next poll.
         for (const channel in state.StreamInfos) {
-            const si = state.StreamInfos[channel];
-            if (si && si.EarlyReloadTriggered) {
-                si.EarlyReloadTriggered = false;
-                si.EarlyReloadAwaitingResult = false;
-                si.EarlyReloadCount = Math.max(0, (si.EarlyReloadCount || 0) - 1);
-                cleared = true;
-            }
+            state.StreamInfos[channel].ReloadPending = true;
         }
-        if (cleared) {
-            console.log(
-                '[AD DEBUG] Reload skipped by main thread (player healthy) — early reload state cleared, can retry',
-            );
-        }
+    } else if (e.data.key === 'ReloadResult') {
+        settleReload(e.data.value.requestId, e.data.value.outcome);
     } else if (e.data.key === 'SimulateAds') {
         state.SimulatedAdsDepth = e.data.value;
         console.log('SimulatedAdsDepth: ' + state.SimulatedAdsDepth);

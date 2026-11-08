@@ -106,8 +106,10 @@ export function injectWorker(scriptPath, options = {}) {
  *   twitchWorkerJs?: string,
  *   console?: object,
  *   now?: () => number,
+ *   reload?: (message: { kind?: string, requestId?: number }) => 'reloaded' | 'skipped-healthy' | 'not-done',
  *   setup?: (worker: object) => void,
- * }} options `setup` runs against the worker global before the blob.
+ * }} options `setup` runs against the worker global before the blob. `reload` plays the page's
+ *   doTwitchPlayerTask for a ReloadPlayer message (default: every reload happens).
  */
 export function startWorker(blobSource, options) {
     const posted = [];
@@ -149,9 +151,18 @@ export function startWorker(blobSource, options) {
     const deliver = (data) => {
         for (const fn of messageHandlers) fn({ data });
     };
-    // Plays the page's part: answers relayed GQL requests.
+    // Plays the page's part: answers relayed GQL requests and reload requests.
     worker.postMessage = (message) => {
         posted.push(message);
+        if (message.key === 'ReloadPlayer') {
+            const outcome = options.reload ? options.reload(message) : 'reloaded';
+            setTimeout(() => {
+                if (outcome === 'reloaded') deliver({ key: 'TriggeredPlayerReload' });
+                if (message.requestId) {
+                    deliver({ key: 'ReloadResult', value: { requestId: message.requestId, outcome } });
+                }
+            });
+        }
         if (message.key === 'FetchRequest') {
             const request = message.value;
             const answer = options.gql ? options.gql(JSON.parse(request.options.body)) : { status: 500, body: '' };

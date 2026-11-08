@@ -49,6 +49,7 @@ function assertDeepEq(actual, expected, message) {
 // ============================================================
 const vaft = loadModules([
     'src/worker/ads.ts',
+    'src/worker/ad-break.ts',
     'src/worker/playlist.ts',
     'src/worker/stream-info.ts',
     'src/worker/state.ts',
@@ -60,15 +61,22 @@ const {
     getServerTimeFromM3u8,
     replaceServerTimeInM3u8,
     getStreamUrlForResolution,
-    stripAdSegments,
 } = vaft;
+// stripAdSegments works on a break; give the StreamInfo one if it has none.
+const stripAdSegments = (text, stripAll, si) => {
+    if (!si.Break) si.Break = vaft.createAdBreak('');
+    return vaft.stripAdSegments(text, stripAll, si, si.Break);
+};
 const { isValidWorker } = loadModules(['src/page/worker-hook.ts']);
 // Same Map object the loaded code reads and writes; clear() it between cases.
 const AdSegmentCache = vaft.state.AdSegmentCache;
 
-// A real StreamInfo (full field shape from createStreamInfo) with per-test overrides.
-function makeStreamInfo(overrides = {}) {
-    return Object.assign(vaft.createStreamInfo('testchannel', '', ''), overrides);
+// A real StreamInfo (full field shape from createStreamInfo) with per-test overrides, in a break
+// (a real AdBreak from createAdBreak) with `breakOverrides`.
+function makeStreamInfo(overrides = {}, breakOverrides = {}) {
+    const si = Object.assign(vaft.createStreamInfo('testchannel', '', ''), overrides);
+    si.Break = Object.assign(vaft.createAdBreak(''), breakOverrides);
+    return si;
 }
 
 // ============================================================
@@ -229,11 +237,11 @@ const adM3u8 = [
 
 let streamInfo = makeStreamInfo();
 let result = stripAdSegments(adM3u8, false, streamInfo);
-assertEq(streamInfo.NumStrippedAdSegments, 1, 'counts stripped ad segment');
-assert(streamInfo.IsStrippingAdSegments === true, 'marks as stripping');
+assertEq(streamInfo.Break.StrippedSegments, 1, 'counts stripped ad segment');
+assert(streamInfo.Break.IsStripping === true, 'marks as stripping');
 assert(AdSegmentCache.has('https://ad-segment-1.ts'), 'caches ad segment URL');
 assert(!result.includes('https://prefetch.url'), 'removes prefetch URLs during ads');
-assert(streamInfo.RecoverySegments.length === 1, 'caches live segment for recovery');
+assert(streamInfo.Break.RecoverySegments.length === 1, 'caches live segment for recovery');
 
 // Test: no stripping on clean m3u8
 AdSegmentCache.clear();
@@ -245,10 +253,10 @@ const cleanM3u8 = [
     'https://live-segment-2.ts',
 ].join('\n');
 
-streamInfo = makeStreamInfo({ NumStrippedAdSegments: 5 });
+streamInfo = makeStreamInfo({}, { StrippedSegments: 5, IsStripping: true });
 result = stripAdSegments(cleanM3u8, false, streamInfo);
-assertEq(streamInfo.NumStrippedAdSegments, 0, 'resets stripped count on clean m3u8');
-assert(streamInfo.IsStrippingAdSegments === false, 'not stripping on clean m3u8');
+assertEq(streamInfo.Break.StrippedSegments, 5, "keeps the break's stripped total on a poll that strips nothing");
+assert(streamInfo.Break.IsStripping === false, 'not stripping on clean m3u8');
 
 // Test: SCTE-35 CUE-OUT/CUE-IN stripping
 AdSegmentCache.clear();
@@ -313,12 +321,15 @@ const allAdM3u8 = [
     'https://ad-2.ts',
 ].join('\n');
 
-streamInfo = makeStreamInfo({
-    RecoverySegments: [
-        { extinf: '#EXTINF:2.000,live', url: 'https://recovery-1.ts' },
-        { extinf: '#EXTINF:2.000,live', url: 'https://recovery-2.ts' },
-    ],
-});
+streamInfo = makeStreamInfo(
+    {},
+    {
+        RecoverySegments: [
+            { extinf: '#EXTINF:2.000,live', url: 'https://recovery-1.ts' },
+            { extinf: '#EXTINF:2.000,live', url: 'https://recovery-2.ts' },
+        ],
+    },
+);
 result = stripAdSegments(allAdM3u8, false, streamInfo);
 assert(result.includes('https://recovery-1.ts'), 'restores recovery segment 1');
 assert(result.includes('https://recovery-2.ts'), 'restores recovery segment 2');
@@ -338,7 +349,7 @@ const playlistWithSeq = [
 // Cache phase: all 3 live segments, MEDIA-SEQUENCE=100 → RecoveryStartSeq = 100
 streamInfo = makeStreamInfo();
 stripAdSegments(playlistWithSeq, false, streamInfo);
-assertEq(streamInfo.RecoveryStartSeq, 100, 'captures RecoveryStartSeq at cache time');
+assertEq(streamInfo.Break.RecoveryStartSeq, 100, 'captures RecoveryStartSeq at cache time');
 // Injection phase: ads-only playlist with MEDIA-SEQUENCE=200 → should rewrite to 100
 AdSegmentCache.clear();
 const adOnlyWithSeq = ['#EXTM3U', '#EXT-X-MEDIA-SEQUENCE:200', '#EXTINF:2.000,stitched-ad', 'https://ad.ts'].join('\n');
@@ -387,7 +398,7 @@ const multiSignifierM3u8 = [
 
 streamInfo = makeStreamInfo();
 result = stripAdSegments(multiSignifierM3u8, false, streamInfo);
-assert(streamInfo.IsStrippingAdSegments === true, 'detects ads with multiple signifiers');
+assert(streamInfo.Break.IsStripping === true, 'detects ads with multiple signifiers');
 assert(AdSegmentCache.has('https://ad-1.ts'), 'strips segment with multiple signifiers present');
 
 // Test: AdSegmentCache deduplication
@@ -396,10 +407,10 @@ const dupeM3u8 = ['#EXTM3U', '#EXTINF:2.000,stitched-ad', 'https://same-ad.ts'].
 
 streamInfo = makeStreamInfo();
 stripAdSegments(dupeM3u8, false, streamInfo);
-assertEq(streamInfo.NumStrippedAdSegments, 1, 'first strip increments count');
+assertEq(streamInfo.Break.StrippedSegments, 1, 'first strip increments count');
 const streamInfo2 = makeStreamInfo();
 stripAdSegments(dupeM3u8, false, streamInfo2);
-assertEq(streamInfo2.NumStrippedAdSegments, 0, 'duplicate URL does not increment count (already cached)');
+assertEq(streamInfo2.Break.StrippedSegments, 0, 'duplicate URL does not increment count (already cached)');
 
 // ============================================================
 // Test: isValidWorker
@@ -610,25 +621,50 @@ asyncTests.push(async () => {
 }
 
 // ============================================================
-// Test: end-of-break cycle-rescue check reads this break's freeze length
+// Test: end of break (processM3U8 → decideBreakEndAction)
 // ============================================================
+// A worker with one stream in a break; `poll(text)` runs a playlist poll through processM3U8 and
+// returns what the worker posted to the page.
+function breakWorker(breakOverrides = {}, streamOverrides = {}, stateOverrides = {}) {
+    const posted = [];
+    const w = loadModules(
+        [
+            'src/worker/m3u8.ts',
+            'src/worker/ads.ts',
+            'src/worker/ad-break.ts',
+            'src/worker/stream-info.ts',
+            'src/worker/state.ts',
+        ],
+        { globals: { postMessage: (m) => posted.push(m), setTimeout, fetch: async () => new Response('') } },
+    );
+    Object.assign(w.state, stateOverrides);
+    const url = 'https://video-edge.example.net/v1/playlist/abc.m3u8';
+    const si = Object.assign(w.createStreamInfo('chan', '', ''), streamOverrides);
+    si.Break = Object.assign(w.createAdBreak(''), breakOverrides);
+    w.state.StreamInfosByUrl[url] = si;
+    return {
+        w,
+        si,
+        async poll(text = '#EXTM3U\n#EXTINF:2.000,live\nhttps://edge/seg-1.ts') {
+            posted.length = 0;
+            await w.processM3U8(url, text, fetch);
+            return posted.slice();
+        },
+    };
+}
+const lastClean = (bw) => bw.poll(); // with End.cleanPolls 2, this is the third ad-free poll
+const reloads = (msgs) => msgs.filter((m) => m.key === 'ReloadPlayer');
+
 asyncTests.push(async () => {
     console.log('--- end of break: cycle rescue ---');
     const endBreak = async (totalAllStrippedPolls) => {
-        const posted = [];
-        const w = loadModules(['src/worker/m3u8.ts', 'src/worker/stream-info.ts', 'src/worker/state.ts'], {
-            globals: { postMessage: (m) => posted.push(m), setTimeout, fetch: async () => new Response('') },
-        });
-        const url = 'https://video-edge.example.net/v1/playlist/abc.m3u8';
-        w.state.StreamInfosByUrl[url] = Object.assign(w.createStreamInfo('chan', '', ''), {
-            IsShowingAd: true,
-            CleanPlaylistCount: 2, // this poll is the third clean one
-            NumStrippedAdSegments: 4,
-            CycleRescuedThisBreak: true,
+        const bw = breakWorker({
+            End: { since: Date.now(), cleanPolls: 2, bounces: 0 },
+            StrippedSegments: 4,
+            CycleRescued: true,
             TotalAllStrippedPolls: totalAllStrippedPolls,
         });
-        await w.processM3U8(url, '#EXTM3U\n#EXTINF:2.000,live\nhttps://edge/seg-1.ts', fetch);
-        return posted.map((m) => m.key);
+        return (await lastClean(bw)).map((m) => m.key);
     };
     assert(
         !(await endBreak(1)).includes('ReloadPlayer'),
@@ -639,6 +675,404 @@ asyncTests.push(async () => {
         'long freeze (>2 all-stripped polls): end-of-break reload still fires (was skipped: the count was reset first)',
     );
 });
+
+asyncTests.push(async () => {
+    console.log('--- end of break: reload kind ---');
+    // Stripped earlier in the break, then clean backups (polls that strip nothing): still a
+    // stripped break. The count used to reset on every poll that stripped nothing, which turned
+    // these into "no-strip" breaks and skipped the MediaSource flush.
+    let bw = breakWorker({
+        End: { since: Date.now(), cleanPolls: 2, bounces: 0 },
+        LastCommittedBackupPlayerType: 'site',
+    });
+    const strip = (text) => bw.w.stripAdSegments(text, false, bw.si, bw.si.Break);
+    strip('#EXTM3U\n#EXTINF:2.000,\nhttps://edge/ad-1.ts\n#EXTINF:2.000,live\nhttps://edge/l-1.ts');
+    strip('#EXTM3U\n#EXTINF:2.000,live\nhttps://edge/l-2.ts');
+    assertEq(bw.si.Break.StrippedSegments, 1, 'stripped total survives a poll that strips nothing');
+    assertDeepEq(
+        reloads(await lastClean(bw)).map((m) => m.kind),
+        ['early'],
+        'break that stripped earlier ends with a hard reload',
+    );
+    assertEq(bw.si.Break, null, 'break dropped at its end');
+
+    bw = breakWorker({ End: { since: Date.now(), cleanPolls: 2, bounces: 0 }, LastCommittedBackupPlayerType: 'site' });
+    assertDeepEq(
+        reloads(await lastClean(bw)).map((m) => m.kind),
+        ['post-ad'],
+        'no-strip backup break: soft reload',
+    );
+
+    bw = breakWorker({
+        End: { since: Date.now(), cleanPolls: 2, bounces: 0 },
+        LastCommittedBackupPlayerType: 'autoplay',
+    });
+    assertDeepEq(
+        reloads(await lastClean(bw)).map((m) => m.kind),
+        ['early'],
+        'autoplay backup: hard reload',
+    );
+
+    bw = breakWorker({ End: { since: Date.now(), cleanPolls: 2, bounces: 0 } });
+    assertEq(reloads(await lastClean(bw)).length, 0, 'no-strip break without a backup: no reload');
+
+    // Codec swap, nothing stripped, no backup committed: used to drop the swap without a reload,
+    // leaving the player on the AVC-only master playlist.
+    bw = breakWorker({ End: { since: Date.now(), cleanPolls: 2, bounces: 0 } }, { CodecSwap: 'swapped' });
+    assertDeepEq(
+        reloads(await lastClean(bw)).map((m) => m.kind),
+        ['post-ad'],
+        'codec swap is undone by a reload',
+    );
+    assertEq(bw.si.CodecSwap, 'native', 'codec swap back to native at break end');
+});
+
+// ============================================================
+// Test: ad-break lifecycle (onAdPoll / onAdFreePoll)
+// ============================================================
+{
+    console.log('--- ad-break lifecycle ---');
+    const ab = loadModules(['src/worker/ad-break.ts']);
+    let brk = ab.createAdBreak('X-TV-TWITCH-AD-POD-LENGTH="3",X-TV-TWITCH-AD-RADS-TOKEN="t"');
+    assertEq(brk.PodLength, 3, 'pod length parsed');
+    assert(brk.HasConfirmedAdAttrs, 'RADS token confirms the break');
+    assertEq(ab.onAdFreePoll(brk, true), null, 'first ad-free poll: break goes on');
+    assertEq(ab.onAdFreePoll(brk, true), null, 'second ad-free poll: break goes on');
+    ab.onAdPoll(brk);
+    assertEq(brk.End.cleanPolls, 0, 'bounce resets the clean-poll run');
+    assertEq(brk.End.bounces, 1, 'bounce counted, candidate kept');
+    assertEq(ab.onAdFreePoll(brk, true), null, 'after a bounce the run starts over');
+    ab.onAdFreePoll(brk, true);
+    assertEq(ab.onAdFreePoll(brk, true), 'clean-polls', 'three ad-free polls in a row end the break');
+    brk = ab.createAdBreak('');
+    assertEq(ab.onAdFreePoll(brk, false), 'no-live-segments', 'ad-free poll without live segments ends it');
+    brk = ab.createAdBreak('');
+    ab.onAdFreePoll(brk, true);
+    brk.End.since -= 12000;
+    ab.onAdPoll(brk);
+    assertEq(brk.End, null, 'a stale candidate is dropped by an ad-marked poll');
+    ab.onAdFreePoll(brk, true);
+    brk.End.since -= 12000;
+    assertEq(ab.onAdFreePoll(brk, true), 'max-wait', 'an old candidate ends the break on max wait');
+}
+
+// ============================================================
+// Test: early reload state machine
+// ============================================================
+{
+    console.log('--- early reload ---');
+    const posted = [];
+    const er = loadModules(
+        ['src/worker/early-reload.ts', 'src/worker/reload.ts', 'src/worker/ad-break.ts', 'src/worker/state.ts'],
+        { globals: { postMessage: (m) => posted.push(m) } },
+    );
+    const frozen = (brk, polls) => {
+        brk.IsStripping = true;
+        brk.ConsecutiveAllStrippedPolls = polls;
+        brk.TotalAllStrippedPolls = polls;
+    };
+    const lastRequest = () => posted.filter((m) => m.key === 'ReloadPlayer').at(-1);
+    const brk = er.createAdBreak('X-TV-TWITCH-AD-POD-LENGTH="2"');
+    brk.RecoverySegments = new Array(6).fill({ extinf: '#EXTINF:2.000,live', url: 'u' });
+    frozen(brk, 2);
+    er.stepEarlyReload(brk, '');
+    assertEq(brk.EarlyReload.phase, 'armed', 'below the poll threshold: no reload');
+    frozen(brk, 3);
+    er.stepEarlyReload(brk, '');
+    assertEq(brk.EarlyReload.phase, 'requested', 'threshold reached: reload requested');
+    const first = lastRequest();
+    assertEq(first.kind, 'early', 'early reload is hard');
+    er.stepEarlyReload(brk, '');
+    assertEq(posted.filter((m) => m.key === 'ReloadPlayer').length, 1, 'no second request while one is pending');
+    er.settleReload(first.requestId + 100, 'reloaded');
+    assertEq(brk.EarlyReload.phase, 'requested', 'an answer to another request is ignored');
+    er.settleReload(first.requestId, 'skipped-healthy');
+    assertEq(brk.EarlyReload.phase, 'armed', 'skipped as healthy: re-armed');
+    assertEq(brk.EarlyReloadCount, 0, 'skipped as healthy: budget refunded');
+    er.stepEarlyReload(brk, '');
+    er.settleReload(lastRequest().requestId, 'reloaded');
+    assertEq(brk.EarlyReload.phase, 'reloaded', 'page reloaded: waiting for the next poll');
+    // Next poll: still all stripped, recovery segments (",live") injected. Used to read as
+    // "partial" and latch, blocking the rest of the budget.
+    er.stepEarlyReload(brk, '');
+    assertEq(brk.EarlyReloadCount, 2, 'still ads: re-armed and fired again within the pod budget');
+    er.settleReload(lastRequest().requestId, 'reloaded');
+    er.stepEarlyReload(brk, '');
+    assertEq(brk.EarlyReloadCount, 2, 'budget (one per ad in the pod) is not exceeded');
+    assertEq(brk.EarlyReload.phase, 'armed', 'result reported, armed');
+    const b2 = er.createAdBreak('');
+    frozen(b2, 1); // thin recovery cache (0 segments): threshold 1
+    er.stepEarlyReload(b2, '', false);
+    assertEq(b2.EarlyReload.phase, 'armed', 'canFire=false: no reload');
+    er.stepEarlyReload(b2, '');
+    assertEq(b2.EarlyReload.phase, 'requested', 'thin cache: fires after one poll');
+    b2.EarlyReload.at -= 11000;
+    er.stepEarlyReload(b2, '', false);
+    assertEq(b2.EarlyReload.phase, 'armed', 'unanswered request times out and re-arms');
+    er.settleReload(lastRequest().requestId, 'reloaded');
+    assertEq(b2.EarlyReload.phase, 'armed', 'late answer after the timeout is ignored');
+}
+
+// ============================================================
+// Test: codec-aware backup variant selection
+// ============================================================
+{
+    console.log('--- backup variant codec ---');
+    const pl = loadModules(['src/worker/playlist.ts']);
+    const enc = [
+        '#EXTM3U',
+        '#EXT-X-STREAM-INF:RESOLUTION=1920x1080,CODECS="hev1.1.6.L120.90,mp4a.40.2",FRAME-RATE=60.000',
+        'https://b/hevc1080.m3u8',
+        '#EXT-X-STREAM-INF:RESOLUTION=1920x1080,CODECS="avc1.64002A,mp4a.40.2",FRAME-RATE=60.000',
+        'https://b/avc1080.m3u8',
+        '#EXT-X-STREAM-INF:RESOLUTION=2560x1440,CODECS="av01.0.12M.10,mp4a.40.2",FRAME-RATE=60.000',
+        'https://b/av1-1440.m3u8',
+    ].join('\n');
+    const pick = (codecs) =>
+        pl.getStreamVariantForResolution(enc, { Resolution: '1920x1080', FrameRate: 60, Codecs: codecs })?.url;
+    assertEq(pick('avc1.4D401F'), 'https://b/avc1080.m3u8', 'AVC player gets the AVC variant (HEVC listed first)');
+    assertEq(pick('hvc1.2.4.L123'), 'https://b/hevc1080.m3u8', 'HEVC player gets the HEVC variant');
+    assertEq(pick('av01.0.08M.08'), 'https://b/av1-1440.m3u8', 'same family preferred over exact resolution');
+    assertEq(pick(undefined), 'https://b/hevc1080.m3u8', 'no codec given: first resolution match, as before');
+    assertEq(
+        pl.getStreamUrlForResolution(enc, { Resolution: '1920x1080', FrameRate: 60 }),
+        'https://b/hevc1080.m3u8',
+        'getStreamUrlForResolution unchanged without a codec',
+    );
+    assert(pl.isCodecMismatch('hev1.1', 'avc1.64'), 'HEVC player, AVC backup: mismatch');
+    assert(pl.isCodecMismatch('avc1.64', 'hev1.1'), 'AVC player, HEVC backup: mismatch (the missing direction)');
+    assert(pl.isCodecMismatch('hev1.1', ''), 'HEVC player, unknown backup codec: mismatch');
+    assert(!pl.isCodecMismatch('avc1.64', ''), 'AVC player, unknown backup codec: fine');
+    assert(!pl.isCodecMismatch('avc1.64', 'avc1.4D'), 'AVC to AVC: fine');
+}
+
+// ============================================================
+// Test: page reload marks each stream's own next poll
+// ============================================================
+asyncTests.push(async () => {
+    console.log('--- reload pending per stream ---');
+    const w = loadModules(['src/worker/m3u8.ts', 'src/worker/stream-info.ts', 'src/worker/state.ts'], {
+        globals: { postMessage() {}, setTimeout, fetch: async () => new Response('') },
+    });
+    const a = w.createStreamInfo('a', '', '');
+    const b = w.createStreamInfo('b', '', '');
+    w.state.StreamInfos.a = a;
+    w.state.StreamInfos.b = b;
+    w.state.StreamInfosByUrl['https://x/a.m3u8'] = a;
+    a.ReloadPending = true;
+    b.ReloadPending = true;
+    await w.processM3U8('https://x/a.m3u8', '#EXTM3U\n#EXTINF:2.000,live\nhttps://x/s1.ts', fetch);
+    assert(a.LastPlayerReload > 0 && !a.ReloadPending, 'polled stream stamps its reload');
+    assert(b.ReloadPending && b.LastPlayerReload === 0, "another stream's poll doesn't consume this one's");
+});
+
+// ============================================================
+// Test: page reload task outcomes and the hard-reload mute restore
+// ============================================================
+function makePage({ video, paused = false, pip = null, storage = {} } = {}) {
+    const listeners = [];
+    const timers = [];
+    let now = 0;
+    const setSrcCalls = [];
+    const player = {
+        isPaused: () => paused,
+        core: { paused, state: { muted: false, volume: 1, quality: { group: 'chunked' } } },
+        pause() {},
+        play: () => Promise.resolve(),
+        getHTMLVideoElement: () => page.videos[0],
+    };
+    const playerState = { setSrc: (o) => setSrcCalls.push(o), setInitialPlaybackSettings() {} };
+    const fiber = {
+        stateNode: null,
+        child: {
+            stateNode: { setPlayerActive() {}, props: { mediaPlayerInstance: player } },
+            sibling: { stateNode: playerState },
+        },
+    };
+    const store = new Map(Object.entries(storage));
+    const page = {
+        videos: [video],
+        listeners,
+        setSrcCalls,
+        advance(ms) {
+            now += ms;
+            for (const t of timers.splice(0).sort((x, y) => x.at - y.at)) {
+                if (t.at <= now && !t.cleared) t.fn();
+                else if (!t.cleared) timers.push(t);
+            }
+        },
+        dispatch(type, target) {
+            for (const l of listeners.slice()) if (l.type === type) l.fn({ target });
+        },
+    };
+    page.mod = loadModules(['src/page/player.ts', 'src/page/state.ts'], {
+        globals: {
+            document: {
+                pictureInPictureElement: pip,
+                querySelector: (sel) =>
+                    sel === '#root' ? { _reactRootContainer: { _internalRoot: { current: fiber } } } : null,
+                getElementsByTagName: () => page.videos,
+                addEventListener: (type, fn) => listeners.push({ type, fn }),
+                removeEventListener: (type, fn) => {
+                    const i = listeners.findIndex((l) => l.type === type && l.fn === fn);
+                    if (i !== -1) listeners.splice(i, 1);
+                },
+            },
+            navigator: { platform: 'Linux x86_64', maxTouchPoints: 0 },
+            localStorage: { getItem: (k) => store.get(k) ?? null, setItem: (k, v) => store.set(k, String(v)) },
+            setTimeout: (fn, ms) => {
+                const t = { fn, at: now + ms, cleared: false };
+                timers.push(t);
+                return t;
+            },
+            clearTimeout: (t) => {
+                if (t) t.cleared = true;
+            },
+            setInterval: () => 0,
+            clearInterval() {},
+        },
+    });
+    return page;
+}
+function makeVideo(overrides = {}) {
+    return Object.assign(
+        {
+            tagName: 'VIDEO',
+            muted: false,
+            paused: false,
+            ended: false,
+            readyState: 4,
+            currentTime: 100,
+            isConnected: true,
+            dataset: {},
+            playbackRate: 1,
+            seekable: { length: 1, end: () => 102 },
+            buffered: { length: 0 },
+        },
+        overrides,
+    );
+}
+{
+    console.log('--- page reload outcomes ---');
+    let page = makePage({ video: makeVideo() });
+    assertEq(page.mod.doTwitchPlayerTask('reload'), 'skipped-healthy', 'healthy, near live: plain reload skipped');
+    assertEq(page.setSrcCalls.length, 0, 'skipped: no setSrc');
+    assertEq(page.mod.doTwitchPlayerTask('reload', 'codec-swap'), 'done', 'codec-swap reload never skipped as healthy');
+    assertDeepEq(
+        page.setSrcCalls[0],
+        { isNewMediaPlayerInstance: false, refreshAccessToken: false },
+        'codec-swap reload is soft',
+    );
+    page = makePage({ video: makeVideo({ readyState: 1 }) });
+    assertEq(page.mod.doTwitchPlayerTask('reload', 'early'), 'done', 'stalled player: early reload done');
+    assertDeepEq(page.setSrcCalls[0], { isNewMediaPlayerInstance: true, refreshAccessToken: true }, 'early is hard');
+    page = makePage({ video: makeVideo(), paused: true });
+    page.mod.playerBufferState.userPauseIntent = true;
+    assertEq(page.mod.doTwitchPlayerTask('reload', 'early'), 'not-done', 'user paused: not done');
+    page = makePage({ video: makeVideo({ readyState: 1 }), pip: {} });
+    assertEq(page.mod.doTwitchPlayerTask('reload', 'early'), 'not-done', 'PiP: downgraded to pause/play, not done');
+    assertEq(page.setSrcCalls.length, 0, 'PiP: no setSrc');
+}
+{
+    console.log('--- hard reload mute restore ---');
+    const video = makeVideo({ readyState: 1 });
+    const page = makePage({ video });
+    page.mod.doTwitchPlayerTask('reload', 'early');
+    assert(video.muted, 'hard reload pre-mutes');
+    assertEq(page.listeners.length, 3, 'restore listens for canplay / playing / loadeddata');
+    page.advance(1000);
+    // Second hard reload while the first restore is pending: the element is muted by OUR
+    // pre-mute. It used to be read as a user mute (no restore armed for this reload) while the
+    // first reload's listeners and timers stayed live alongside.
+    page.mod.doTwitchPlayerTask('reload', 'early');
+    assertEq(page.listeners.length, 3, 'second reload takes over: one set of listeners, not two');
+    const newVideo = makeVideo({ readyState: 1, muted: true });
+    page.videos = [newVideo];
+    page.dispatch('canplay', newVideo);
+    assertEq(newVideo.muted, false, 'new element unmuted on canplay');
+    assertEq(video.muted, false, 'pre-mute on the original element cleared');
+    assertEq(page.listeners.length, 0, 'listeners removed after restore');
+    assert(page.mod.playerBufferState.vaftEverUnmuted, 'vaftEverUnmuted set');
+    newVideo.muted = true; // Twitch's LS-restore re-mutes
+    page.advance(5500);
+    assertEq(newVideo.muted, false, 'backstop unmutes once');
+    // A user who was muted before the first reload stays muted.
+    const mutedVideo = makeVideo({ readyState: 1, muted: true });
+    // The user's mute is in localStorage (Twitch writes it); without it, the 3s restore treats
+    // the mute as Chrome's autoplay policy and unmutes.
+    const p2 = makePage({ video: mutedVideo, storage: { 'video-muted': '{"default":true}' } });
+    p2.mod.doTwitchPlayerTask('reload', 'early');
+    p2.mod.doTwitchPlayerTask('reload', 'early');
+    p2.advance(6000);
+    assert(mutedVideo.muted, 'muted from the start (no vaft unmute this session): mute respected');
+    assertEq(p2.listeners.length, 0, 'no restore armed for a user mute');
+}
+
+// ============================================================
+// Test: page stall ladder
+// ============================================================
+{
+    console.log('--- stall ladder ---');
+    const st = loadModules(['src/page/stall.ts']);
+    const ladder = st.createStallLadder();
+    const run = (obs, n, cap = true) => {
+        const actions = [];
+        for (let i = 0; i < n; i++) actions.push(st.stallTick(ladder, obs, 3, cap).action);
+        return actions.filter((a) => a !== 'none');
+    };
+    assertDeepEq(run('frozen', 6), ['pause-play', 'pause-play'], 'two pause/plays first');
+    assertDeepEq(run('hold', 5), [], 'hold neither counts nor resets');
+    assertDeepEq(run('frozen', 3), ['reload'], 'third fix escalates to a reload');
+    assertDeepEq(run('frozen', 9), ['pause-play', 'pause-play', 'pause-play'], 'reload cap: pause/play only');
+    assert(st.stallTick(ladder, 'frozen', 3, true).capped === false, 'not capped mid-count');
+    run('healthy', 1);
+    assertDeepEq(ladder, { frozenTicks: 0, fixAttempts: 0, reloadUsed: false }, 'healthy tick resets the window');
+    run('frozen', 9);
+    assertDeepEq(run('frozen', 9, false), ['pause-play', 'pause-play', 'reload'], 'cap disabled: reloads again');
+}
+
+// ============================================================
+// Test: post-break wedge watch
+// ============================================================
+{
+    console.log('--- wedge watch ---');
+    const wd = loadModules(['src/page/wedge.ts']);
+    let watch = wd.armWedgeWatch();
+    let t = 10;
+    let frames = 1000;
+    const sample = (dt, df) => {
+        t += dt;
+        frames += df;
+        const r = wd.wedgeSample(watch, t, frames);
+        watch = r.next;
+        return r.step.action;
+    };
+    assertEq(sample(0, 0), 'none', 'first sample is the baseline');
+    const wedged = [];
+    for (let i = 0; i < 6; i++) wedged.push(sample(1, 0));
+    assertDeepEq(wedged.slice(0, 5), ['none', 'none', 'none', 'none', 'none'], 'evidence accumulates');
+    assertEq(wedged[5], 'nudge', 'sixth wedged evaluation: pause/play nudge');
+    for (let i = 0; i < 5; i++) sample(1, 0);
+    assertEq(sample(1, 0), 'reload', 'recurs: reload');
+    assertEq(watch.phase, 'disarmed', 'reload disarms the watch');
+    watch = wd.armWedgeWatch();
+    sample(0, 0);
+    sample(1, 30);
+    sample(1, 30);
+    sample(1, 30);
+    assertEq(watch.phase, 'disarmed', 'three healthy evaluations disarm');
+    watch = wd.armWedgeWatch();
+    sample(0, 0);
+    for (let i = 0; i < 5; i++) sample(1, 0);
+    sample(1, -500); // reload: frame counter went backwards
+    assertEq(watch.evidence, 0, 'frame counter reset is not evidence');
+    sample(0.1, 0);
+    assertEq(watch.evidence, 0, 'no playhead advance: not evaluated');
+    watch = wd.armWedgeWatch();
+    sample(0, 0);
+    for (let i = 0; i < 40; i++) sample(1, 3); // ambiguous
+    assertEq(watch.phase, 'disarmed', 'watch ends after 40 evaluations');
+}
 
 // ============================================================
 // Test: worker GQL request headers (gqlRequest)
@@ -896,6 +1330,87 @@ asyncTests.push(async () => {
         ['early'],
         'no-strip break on the autoplay backup: hard reload (token refresh restores Source quality)',
     );
+    // Pinning: break 1 commits popout (site is ad-laden). Break 2 starts with the pinned popout
+    // (warm cache, no token fetch) unless pinning is off, where site comes first again.
+    const twoBreaks = {
+        backupAds: { site: 6 },
+        phases: [
+            { ads: 0, polls: 2 },
+            { ads: 4, polls: 2 },
+            { ads: 0, polls: 4 },
+            { ads: 4, polls: 1 },
+        ],
+    };
+    const secondBreakTokens = async (localStorage) =>
+        (await runScenario(BUILT, { ...twoBreaks, localStorage })).transcript
+            .filter((t) => t.label === 'phase 3 poll 0')
+            .flatMap((t) => t.messages)
+            .filter((m) => m.key === 'FetchRequest')
+            .map((m) => JSON.parse(m.body).variables.playerType);
+    assertDeepEq(await secondBreakTokens(), [], 'pinned popout tried first in the next break (warm, no token fetch)');
+    assertDeepEq(
+        await secondBreakTokens({ twitchAdSolutions_pinBackupPlayerType: 'false' }),
+        ['site'],
+        'pinBackupPlayerType=false: nothing pinned (site and the other Source types used to be pinned anyway)',
+    );
+    // Codec swap the page couldn't do (paused, PiP): back to native, not retried every poll.
+    const hevc = await runScenario(BUILT, {
+        ...SCENARIOS['HEVC stream, ad break'],
+        reload: (m) => (m.kind === 'codec-swap' ? 'not-done' : 'reloaded'),
+    });
+    const swaps = hevc.transcript.flatMap((t) => t.messages).filter((m) => m.kind === 'codec-swap');
+    assertEq(swaps.length, 1, 'codec swap requested once per break');
+    const hevcDefault = await runScenario(BUILT, SCENARIOS['HEVC stream, ad break']);
+    assertDeepEq(
+        reloads(hevcDefault.transcript.find((t) => t.label === 'phase 1 poll 0').messages).map((m) => m.kind),
+        ['codec-swap'],
+        'the poll that starts the codec swap sends no early reload alongside it (used to send two)',
+    );
+    const hevcLog = [];
+    const hevcStuck = await runScenario(BUILT, {
+        ...SCENARIOS['HEVC stream, ad break'],
+        phases: [
+            { ads: 0, polls: 2 },
+            { ads: 4, polls: 2 },
+        ],
+        console: { log: (...a) => hevcLog.push(a.join(' ')) },
+        reload: (m) => (m.kind === 'codec-swap' ? 'not-done' : 'reloaded'),
+    });
+    assert(
+        hevcLog.some((l) => l.includes('Codec-swap reload not done by the page (not-done)')),
+        'codec swap not done: worker returns to the native codec',
+    );
+    assert(hevcStuck.transcript.length > 0, 'scenario ran');
+});
+
+// ============================================================
+// Test: the page answers reload requests (ReloadResult)
+// ============================================================
+asyncTests.push(async () => {
+    console.log('--- built userscript: reload requests ---');
+    if (!existsSync(BUILT)) return;
+    const sent = [];
+    const handlers = [];
+    injectWorker(BUILT, {
+        setup(page) {
+            const proto = page.Worker.prototype;
+            proto.postMessage = (m) => sent.push(m);
+            const add = proto.addEventListener;
+            proto.addEventListener = function (type, fn) {
+                add.call(this, type, fn);
+                if (type === 'message') handlers.push(fn);
+            };
+        },
+    });
+    for (const fn of handlers) fn({ data: { key: 'ReloadPlayer', kind: 'early', requestId: 7 } });
+    assertDeepEq(
+        sent.filter((m) => m.key === 'ReloadResult'),
+        [{ key: 'ReloadResult', value: { requestId: 7, outcome: 'not-done' } }],
+        'no player on the page: the request is answered not-done',
+    );
+    sent.length = 0;
+    for (const fn of handlers) fn({ data: { key: 'ReloadPlayer', kind: 'post-ad' } });
+    assertEq(sent.filter((m) => m.key === 'ReloadResult').length, 0, 'no requestId: no answer');
 });
 
 // ============================================================

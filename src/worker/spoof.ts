@@ -1,4 +1,4 @@
-import type { StreamInfo } from '../shared/types.ts';
+import type { AdBreak } from '../shared/types.ts';
 import { parseAttributes } from './playlist.ts';
 import { gqlRequest } from './gql.ts';
 
@@ -13,13 +13,13 @@ let loggedBadStatus = false;
 // never fire. Spoofing them mimics the "ad played normally" signal, potentially
 // reducing detection escalation. RADS-token extracted from the stitched-ad DATERANGE
 // line. Failures swallowed — never block normal ad-block flow.
-export function notifyAdComplete(textStr: string, streamInfo: StreamInfo) {
+export function notifyAdComplete(textStr: string, brk: AdBreak) {
     try {
         // Each ad in a pod has its OWN #EXT-X-DATERANGE:ID="stitched-ad-..." line
         // with its own RADS-token, ad-id, creative-id, line-item-id, position, etc.
         // Twitch reveals each ad's DATERANGE only when that ad starts playing, so a
         // 6-ad pod surfaces ONE ad per m3u8 poll across the break. This function is
-        // called on every ad-laden poll; streamInfo.SpoofedAdIds dedups across polls
+        // called on every ad-laden poll; brk.SpoofedAdIds dedups across polls
         // so each ad is spoofed exactly once as it appears (full N/N pod coverage).
         const matches = [...textStr.matchAll(/#EXT-X-DATERANGE:(ID="stitched-ad-[^\n]+)\n/g)];
         if (matches.length === 0) {
@@ -33,7 +33,7 @@ export function notifyAdComplete(textStr: string, streamInfo: StreamInfo) {
             }
             return;
         }
-        const spoofedSet = (streamInfo && streamInfo.SpoofedAdIds) || null;
+        const spoofedSet = brk.SpoofedAdIds;
         // True pod size from the m3u8 attribute (present on each DATERANGE); fall
         // back to visible-match count if absent. Keeps total_ads consistent across
         // all ads in the pod even though they surface one poll at a time.
@@ -45,7 +45,7 @@ export function notifyAdComplete(textStr: string, streamInfo: StreamInfo) {
         // waste — bail before the per-match parseAttributes loop. (size at entry is
         // before this poll's additions, so the poll that completes the pod still
         // runs and attaches pod_complete; only subsequent polls short-circuit.)
-        if (spoofedSet && spoofedSet.size >= podLength) {
+        if (spoofedSet.size >= podLength) {
             return;
         }
         let newSpoofed = 0;
@@ -59,7 +59,7 @@ export function notifyAdComplete(textStr: string, streamInfo: StreamInfo) {
             const idMatch = matches[i][1].match(/^ID="([^"]+)"/);
             const stitchedAdId = idMatch ? idMatch[1] : '';
             // Multi-poll dedup: skip ads already spoofed earlier this break.
-            if (spoofedSet && stitchedAdId && spoofedSet.has(stitchedAdId)) {
+            if (stitchedAdId && spoofedSet.has(stitchedAdId)) {
                 continue;
             }
             const attr = parseAttributes(matches[i][1]);
@@ -118,7 +118,7 @@ export function notifyAdComplete(textStr: string, streamInfo: StreamInfo) {
             });
             // Mark this ad spoofed BEFORE building the batch so the pod-complete
             // size check below reflects it.
-            if (spoofedSet && stitchedAdId) spoofedSet.add(stitchedAdId);
+            if (stitchedAdId) spoofedSet.add(stitchedAdId);
             const batch = [
                 makePacket('video_ad_impression'),
                 makePacket('video_ad_quartile_complete', { quartile: 1 }),
@@ -132,9 +132,8 @@ export function notifyAdComplete(textStr: string, streamInfo: StreamInfo) {
             // that brings the dedup set up to the true pod size (the last ad). If
             // the pod never fully surfaces (some DATERANGEs missed / break ended
             // early) pod_complete is correctly never sent — a real player wouldn't
-            // claim pod completion it didn't reach either. Defensive fallback (no
-            // dedup set): keep per-ad pod_complete so the signal isn't lost.
-            if (!spoofedSet || spoofedSet.size === podLength) {
+            // claim pod completion it didn't reach either.
+            if (spoofedSet.size === podLength) {
                 batch.push(makePacket('video_ad_pod_complete'));
                 podCompleteSent = true;
             }
@@ -159,14 +158,14 @@ export function notifyAdComplete(textStr: string, streamInfo: StreamInfo) {
             newSpoofed++;
         }
         if (newSpoofed > 0) {
-            const total = spoofedSet ? spoofedSet.size : newSpoofed;
+            const total = spoofedSet.size;
             // src= which stream the spoofed DATERANGEs came from (primary vs a
             // committed backup player-type) — surfaces the stream-swap ad-ID
             // mixing limitation: a pod that spoofs across primary+backup shows
             // src changing mid-pod. pod-complete= whether this poll attached the
             // single video_ad_pod_complete (lets you confirm pod completion
             // explicitly instead of inferring it from the total/POD ratio).
-            const src = (streamInfo && streamInfo.ActiveBackupPlayerType) || 'primary';
+            const src = brk.ActiveBackupPlayerType || 'primary';
             console.log(
                 '[AD DEBUG] Spoofed ad completion for ' +
                     newSpoofed +

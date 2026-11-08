@@ -158,13 +158,15 @@ const pixeltris = (() => {
 
 const vaftContext = loadModules([
     'src/worker/ads.ts',
+    'src/worker/ad-break.ts',
     'src/worker/playlist.ts',
     'src/worker/stream-info.ts',
     'src/worker/state.ts',
 ]);
 const vaft = {
     hasAdTags: vaftContext.hasAdTags,
-    stripAdSegments: vaftContext.stripAdSegments,
+    // vaft's stripAdSegments also takes the break it runs in.
+    stripAdSegments: (text, stripAll, si) => vaftContext.stripAdSegments(text, stripAll, si, si.Break),
     parseAttributes: vaftContext.parseAttributes,
     reset() {
         vaftContext.state.AdSegmentCache.clear();
@@ -209,7 +211,9 @@ function compare(label, pixeltrisFn, vaftFn, iterations) {
 }
 
 function makeStreamInfo() {
-    return vaftContext.createStreamInfo('benchchannel', '', '');
+    const si = vaftContext.createStreamInfo('benchchannel', '', '');
+    si.Break = vaftContext.createAdBreak('');
+    return si;
 }
 
 // ============================================================

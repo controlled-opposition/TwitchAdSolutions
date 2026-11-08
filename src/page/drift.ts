@@ -1,57 +1,66 @@
+// Drift correction: play faster than real time until the playhead is back near the live edge.
+//
+//     idle ──startDriftCorrection(el)──▶ catching up ──≤1s behind / 30s timeout / cancel──▶ idle
+//
+// Restarting while catching up starts fresh. The element whose rate was raised is tracked, so
+// finishing always resets that element (a reload in between can put a different <video> first in
+// the DOM), and the new player element too if it has picked up the raised rate.
 import { getPlayerVideoElement } from './twitch.ts';
 import { state } from './state.ts';
 
-let driftCatchUpInterval: ReturnType<typeof setInterval> | null = null;
-let driftCatchUpTimeout: ReturnType<typeof setTimeout> | null = null;
-function clearDriftTimers() {
-    if (driftCatchUpInterval) {
-        clearInterval(driftCatchUpInterval);
-        driftCatchUpInterval = null;
-    }
-    if (driftCatchUpTimeout) {
-        clearTimeout(driftCatchUpTimeout);
-        driftCatchUpTimeout = null;
-    }
+const CHECK_INTERVAL_MS = 500;
+const SAFETY_TIMEOUT_MS = 30000;
+/** Close enough to the buffered end to stop catching up (s). */
+const CAUGHT_UP_S = 1;
+
+interface Catchup {
+    element: HTMLVideoElement;
+    interval: ReturnType<typeof setInterval>;
+    timeout: ReturnType<typeof setTimeout>;
 }
+let catchup: Catchup | null = null;
+
+/** Back to idle: stop the timers and return the tracked element (and the current one) to 1×. */
+function finish() {
+    if (!catchup) return;
+    const { element, interval, timeout } = catchup;
+    catchup = null;
+    clearInterval(interval);
+    clearTimeout(timeout);
+    try {
+        element.playbackRate = 1.0;
+    } catch {}
+    try {
+        const current = getPlayerVideoElement();
+        if (current && current !== element && current.playbackRate === state.DriftCorrectionRate) {
+            current.playbackRate = 1.0;
+        }
+    } catch {}
+}
+
 export function startDriftCorrection(videoElement: HTMLVideoElement) {
     if (state.DriftCorrectionRate <= 1) return;
-    clearDriftTimers();
+    finish();
     videoElement.playbackRate = state.DriftCorrectionRate;
     console.log('[AD DEBUG] Drift correction: catching up at ' + state.DriftCorrectionRate + 'x');
-    driftCatchUpInterval = setInterval(() => {
+    const interval = setInterval(() => {
         try {
             const vid = getPlayerVideoElement();
             if (vid && vid.buffered.length > 0) {
-                if (vid.buffered.end(vid.buffered.length - 1) - vid.currentTime <= 1) {
-                    vid.playbackRate = 1.0;
+                if (vid.buffered.end(vid.buffered.length - 1) - vid.currentTime <= CAUGHT_UP_S) {
                     console.log('[AD DEBUG] Drift correction complete — resumed normal playback speed');
-                    clearDriftTimers();
+                    finish();
                 }
             }
         } catch {
-            clearInterval(driftCatchUpInterval ?? undefined);
-            driftCatchUpInterval = null;
+            finish();
         }
-    }, 500);
-    driftCatchUpTimeout = setTimeout(() => {
-        try {
-            videoElement.playbackRate = 1.0;
-        } catch {}
-        if (driftCatchUpInterval) {
-            clearInterval(driftCatchUpInterval);
-            driftCatchUpInterval = null;
-        }
-        driftCatchUpTimeout = null;
-    }, 30000);
+    }, CHECK_INTERVAL_MS);
+    const timeout = setTimeout(finish, SAFETY_TIMEOUT_MS);
+    catchup = { element: videoElement, interval, timeout };
 }
+
 /** Stop any drift catch-up in progress and return to normal speed (no-op when none is running). */
 export function cancelDriftCorrection() {
-    // Clear drift catch-up when ads start — don't run 1.1x during ad handling
-    if (driftCatchUpInterval || driftCatchUpTimeout) {
-        clearDriftTimers();
-        try {
-            const v = getPlayerVideoElement();
-            if (v) v.playbackRate = 1.0;
-        } catch {}
-    }
+    finish();
 }

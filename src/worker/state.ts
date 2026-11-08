@@ -51,7 +51,6 @@ function createWorkerState() {
         AlwaysReloadPlayerOnAd: false, // Always pause/play when entering/leaving ads
         PlayerReloadMinimalRequestsTime: 1500,
         PlayerReloadMinimalRequestsPlayerIndex: 2, //autoplay
-        HasTriggeredPlayerReload: false,
         /** Channel name -> stream state. */
         StreamInfos: Object.create(null) as Record<string, StreamInfo>,
         /** Variant playlist URL -> owning stream state. */

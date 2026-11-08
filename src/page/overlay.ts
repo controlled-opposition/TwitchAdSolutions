@@ -93,7 +93,6 @@ export function updateAdblockBanner(data: Partial<AdBlockBannerMessage> & { hasA
             playerRootDiv.appendChild(adBlockDiv);
         }
         if (adBlockDiv != null) {
-            runtime.isActivelyStrippingAds = !!data.isStrippingAdSegments;
             // The worker sends this on every playlist poll (~2s), mostly unchanged. Write only what
             // changed: each textContent assignment replaces the text node and wakes every
             // MutationObserver on the page (Twitch's and other extensions').

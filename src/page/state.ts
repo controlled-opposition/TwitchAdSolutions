@@ -1,6 +1,8 @@
 // Page-side settings and state.
 import { defaultSharedConfig } from '../shared/config.ts';
+import { createStallLadder, type StallLadder } from './stall.ts';
 import type { TwitchMediaPlayer, TwitchPlayerState } from './twitch.ts';
+import type { WedgeWatch } from './wedge.ts';
 
 function createPageState() {
     return {
@@ -32,6 +34,13 @@ export const runtime = {
     playerForMonitoringBuffering: null as { player: TwitchMediaPlayer; state: TwitchPlayerState } | null,
 };
 
+/**
+ * Loading-circle detector during an ad strip loop (buffer monitor):
+ * idle ──stalled tick──▶ stalling(since) ──3s──▶ reload, then idle (15s cooldown); a tick that
+ * isn't stalled, or any reload, returns to idle.
+ */
+export type AdStallState = { phase: 'idle' } | { phase: 'stalling'; since: number };
+
 /** Buffer-monitor state shared by monitorPlayerBuffering(), doTwitchPlayerTask() and the worker message handler. */
 export interface PlayerBufferState {
     channelName: string | null;
@@ -39,34 +48,31 @@ export interface PlayerBufferState {
     position: number;
     bufferedPosition: number;
     bufferDuration: number;
-    numSame: number;
-    fixAttempts: number;
+    stall: StallLadder;
     lastFixTime: number;
     isLive: boolean;
     lastBackupSwitchAt: number;
     lastReloadAt: number;
-    recoveryReloadUsed: boolean;
     userPauseIntent: boolean;
     loggedPauseIntent: boolean;
     /** Time of our last pause/play or reload (ms); 0 when none is pending. */
     weJustPaused: number;
+    /** Mirror of the worker's ad break (see onAdBreakUpdate in worker-hook.ts). */
     inAdBreak: boolean;
     vaftEverUnmuted: boolean;
     // Set lazily by the monitor. Left unset on purpose: videoCurrentTime is checked with `=== undefined`.
     videoElement?: HTMLVideoElement | null;
     videoCurrentTime?: number;
     lastDriftStartedAt?: number;
-    hasHadData?: boolean;
-    adStallStartAt?: number;
-    lastAdStallReloadAt?: number;
+    // Loading-circle detector
+    /** The player had data (readyState ≥ 3) since this channel started; a stall before that is init. */
+    hasHadData: boolean;
+    adStall: AdStallState;
+    lastAdStallReloadAt: number;
     // Post-break video-wedge watch
-    wedgePrevInAdBreak?: boolean;
-    wedgeEvalsRemaining?: number;
-    wedgeLastTime?: number;
-    wedgeLastFrames?: number;
-    wedgeEvidence?: number;
-    wedgeHealthy?: number;
-    wedgeActions?: number;
+    /** inAdBreak at the previous wedge check (edge detector that arms the watch). */
+    wedgeWasInAdBreak: boolean;
+    wedge: WedgeWatch;
 }
 
 export const playerBufferState: PlayerBufferState = {
@@ -75,16 +81,19 @@ export const playerBufferState: PlayerBufferState = {
     position: 0,
     bufferedPosition: 0,
     bufferDuration: 0,
-    numSame: 0,
-    fixAttempts: 0,
+    stall: createStallLadder(),
     lastFixTime: 0,
     isLive: true,
     lastBackupSwitchAt: 0,
     lastReloadAt: 0,
-    recoveryReloadUsed: false,
     userPauseIntent: false,
     loggedPauseIntent: false,
     weJustPaused: 0,
     inAdBreak: false,
     vaftEverUnmuted: false,
+    hasHadData: false,
+    adStall: { phase: 'idle' },
+    lastAdStallReloadAt: 0,
+    wedgeWasInAdBreak: false,
+    wedge: { phase: 'disarmed' },
 };
